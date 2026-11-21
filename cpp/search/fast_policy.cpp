@@ -377,8 +377,23 @@ HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const
                     }
                     Deal sim = base;
                     sim.play(moves[i]);
-                    while (sim.phase() == Phase::kPlay) sim.play(policy.chooseCard(sim));
-                    if (use_me) {
+                    while (sim.phase() == Phase::kPlay &&
+                           (options.rollout_ab_trick < 0 || sim.tricksPlayed() < options.rollout_ab_trick)) {
+                        sim.play(policy.chooseCard(sim));
+                    }
+                    if (sim.phase() == Phase::kPlay) {
+                        EndgameOptions eo;
+                        eo.tt_log2 = 12;
+                        if (use_me) {
+                            eo.objective = EndgameObjective::kMatchEquity;
+                            eo.bid_model = options.bid_model;
+                            eo.match_scores = options.match_scores;
+                            eo.match_pot = options.match_pot;
+                        }
+                        const int val0 = solveEndgameValue(sim, eo);
+                        const int v_me = (my_team == 0) ? val0 : -val0;
+                        vals[i].push_back(use_me ? (0.5 + double(v_me) / 20000.0) : double(v_me));
+                    } else if (use_me) {
                         const int us = options.match_scores[my_team];
                         const int them = options.match_scores[1 - my_team];
                         vals[i].push_back(options.bid_model->evalDealEquity(sim.result(), deal.config(), deal.dealer(),

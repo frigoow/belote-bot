@@ -431,15 +431,28 @@ Bid BidModel::chooseBidSearch(const Deal& d, const FastPolicyModel& play_policy,
         for (Mask m = my_hand; m; m &= m - 1) my_cards[std::size_t(k++)] = lowestCard(m);
     }
 
-    // Evaluate all legal bids.
+    // Evaluate Pass + best candidate(s): in R1 Pass vs Take; in R2 Pass vs top-2 suits by BidNet.
     std::vector<Bid> cands;
     cands.push_back(Bid::pass());
     if (node_k < 4) {
         cands.push_back(Bid::take());
     } else {
+        const int we_deal = (teamOf(dealer) == my_team) ? 1 : 0;
+        const double v_redeal = lookupV(us, them, pot, 1 - we_deal);
+        std::vector<std::pair<double, Bid>> scored;
         for (const Bid& b : legal) {
-            if (b.kind != Bid::kPass) cands.push_back(b);
+            if (b.kind == Bid::kPass) continue;
+            const double ev_t = expectedVTake(my_hand, blik, b.suit, node_k, us, them, pot, we_deal);
+            float af[kAuctionFeatDim], ctx[kMatchCtxDim];
+            encodeAuctionTake(my_hand, blik, b.suit, node_k, af);
+            evalContext(us, them, pot, we_deal, ev_t, v_redeal, ctx);
+            double vp = 0.0, vt = 0.0;
+            evalBidNetPair(af, ctx, node_k, ev_t, v_redeal, vp, vt);
+            scored.push_back({vt, b});
         }
+        std::sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        const std::size_t keep = std::min<std::size_t>(2, scored.size());
+        for (std::size_t i = 0; i < keep; ++i) cands.push_back(scored[i].second);
     }
 
     std::vector<double> logw(static_cast<std::size_t>(worlds), 0.0);
@@ -477,7 +490,7 @@ Bid BidModel::chooseBidSearch(const Deal& d, const FastPolicyModel& play_policy,
                 const int sp_us = (sp_team == my_team) ? us : them;
                 const int sp_them = (sp_team == my_team) ? them : us;
                 const int sp_we_deal = (teamOf(dealer) == sp_team) ? 1 : 0;
-                lw += bidLogProb(base.hand(sp), blik, k, d.config(), Bid::pass(), sp_us, sp_them, pot, sp_we_deal, 0.04);
+                lw += bidLogProb(base.hand(sp), blik, k, d.config(), Bid::pass(), sp_us, sp_them, pot, sp_we_deal, 0.08);
             }
             base.bid(Bid::pass());
         }

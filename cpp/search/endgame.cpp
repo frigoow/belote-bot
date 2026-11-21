@@ -462,6 +462,15 @@ EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
     return res;
 }
 
+int solveEndgameValue(const Deal& deal, const EndgameOptions& options) {
+    if (deal.phase() != Phase::kPlay) throw std::logic_error("solveEndgameValue: deal is not in kPlay");
+    RootScoring sc;
+    State root;
+    initEndgameRoot(deal, options, sc, root);
+    Solver solver(sc, options.tt_log2);
+    return solver.alphabeta(root, -kInf, kInf);
+}
+
 int evaluateEndgameLine(const Deal& deal, const std::vector<int>& cards, EndgameObjective objective) {
     if (deal.phase() != Phase::kPlay) throw std::logic_error("evaluateEndgameLine: deal is not in kPlay");
     EndgameOptions opts;

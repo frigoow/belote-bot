@@ -1,6 +1,7 @@
 #include "agents/agent.h"
 #include "agents/rule_agent.h"
 
+#include <filesystem>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -231,22 +232,34 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
     }
     auto loadCached = [](const std::string& path) -> std::shared_ptr<const FastPolicyModel> {
         static std::mutex mu;
-        static std::unordered_map<std::string, std::shared_ptr<const FastPolicyModel>> cache;
+        struct Entry {
+            std::filesystem::file_time_type mtime;
+            std::shared_ptr<const FastPolicyModel> model;
+        };
+        static std::unordered_map<std::string, Entry> cache;
+        std::error_code ec;
+        const auto mt = std::filesystem::last_write_time(path, ec);
         std::lock_guard<std::mutex> lock(mu);
         auto it = cache.find(path);
-        if (it != cache.end()) return it->second;
+        if (it != cache.end() && !ec && it->second.mtime == mt) return it->second.model;
         auto m = FastPolicyModel::load(path);
-        cache.emplace(path, m);
+        cache[path] = Entry{mt, m};
         return m;
     };
     auto loadBidCached = [](const std::string& path) -> std::shared_ptr<const BidModel> {
         static std::mutex mu;
-        static std::unordered_map<std::string, std::shared_ptr<const BidModel>> cache;
+        struct Entry {
+            std::filesystem::file_time_type mtime;
+            std::shared_ptr<const BidModel> model;
+        };
+        static std::unordered_map<std::string, Entry> cache;
+        std::error_code ec;
+        const auto mt = std::filesystem::last_write_time(path, ec);
         std::lock_guard<std::mutex> lock(mu);
         auto it = cache.find(path);
-        if (it != cache.end()) return it->second;
+        if (it != cache.end() && !ec && it->second.mtime == mt) return it->second.model;
         auto m = std::make_shared<const BidModel>(BidModel::load(path));
-        cache.emplace(path, m);
+        cache[path] = Entry{mt, m};
         return m;
     };
     if (spec.rfind("bid:", 0) == 0) {
@@ -310,6 +323,8 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
         for (std::size_t i = 2; i < parts.size(); ++i) {
             if (parts[i].rfind("ab", 0) == 0) o.ab_handoff_trick = std::stoi(parts[i].substr(2));
             else if (parts[i] == "noab") o.ab_handoff_trick = -1;
+            else if (parts[i].rfind("rab", 0) == 0) o.rollout_ab_trick = std::stoi(parts[i].substr(3));
+            else if (parts[i] == "norab") o.rollout_ab_trick = -1;
             else if (parts[i] == "nowt") o.weight_play_history = false;
             else if (parts[i] == "race") o.race = true;
             else if (parts[i] == "me") o.use_match_equity = true;

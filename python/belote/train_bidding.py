@@ -257,8 +257,13 @@ def collect_sweep_batched(
         dealers: list[int] = []
         league_rule_teams: list[int] = []
         had_explore: list[bool] = [False] * cur_n
-        # Per-deal decision records: (team, af, mc, is_take)
-        deal_records: list[list[tuple[int, np.ndarray, np.ndarray, int]]] = [[] for _ in range(cur_n)]
+        # Single-deviation exploration (zero continuation bias!):
+        # On 40% of deals, pick ONE random node_k_exp in 0..7 to explore; every
+        # subsequent seat (k > node_k_exp) plays 100% greedily so V(Pass) targets
+        # are NEVER inflated by downstream opponents making random suicide takes.
+        exp_node: list[int] = [int(rng.integers(0, 8)) if rng.random() < 0.40 else -1 for _ in range(cur_n)]
+        # Per-deal decision records: (node_k, team, af, mc, is_take)
+        deal_records: list[list[tuple[int, int, np.ndarray, np.ndarray, int]]] = [[] for _ in range(cur_n)]
         # Record taker's (af, team) when taken for DealOutcomeNet refitting.
         taker_af: list[np.ndarray | None] = [None] * cur_n
 
@@ -359,27 +364,28 @@ def collect_sweep_batched(
                 if league_rule_teams[j] == t_p:
                     chosen = bc.rule_bid(d)
                     if chosen.kind != bc.Bid.Kind.PASS:
-                        # CRITICAL FIX: record the feature vector for the suit ACTUALLY chosen!
                         chosen_ci = next(ci for ci, cb in enumerate(cands) if cb == chosen)
                     else:
                         chosen_ci = best_ci
-                else:
-                    if rng.random() < eps:
-                        had_explore[j] = True
-                        if rng.random() < 0.5:
-                            chosen = bc.Bid.pass_()
-                            chosen_ci = best_ci
-                        else:
-                            chosen_ci = int(rng.integers(0, len(cands))) if rng.random() < 0.35 else best_ci
-                            chosen = cands[chosen_ci]
+                elif node_k == exp_node[j]:
+                    # Single-seat exploratory deviation: try the opposite of greedy
+                    # (or best candidate take) while all downstream seats play greedily.
+                    had_explore[j] = True
+                    greedy_take = float(preds_j[best_ci, 1]) > float(preds_j[best_ci, 0])
+                    if greedy_take:
+                        chosen = bc.Bid.pass_()
+                        chosen_ci = best_ci
                     else:
                         chosen_ci = best_ci
-                        chosen = cands[best_ci] if float(preds_j[best_ci, 1]) > float(preds_j[best_ci, 0]) else bc.Bid.pass_()
+                        chosen = cands[chosen_ci]
+                else:
+                    chosen_ci = best_ci
+                    chosen = cands[best_ci] if float(preds_j[best_ci, 1]) > float(preds_j[best_ci, 0]) else bc.Bid.pass_()
 
                 is_take = 1 if chosen.kind != bc.Bid.Kind.PASS else 0
                 af_rec = bn_af_np[b_start + chosen_ci]
                 mc_rec = bn_mc_np[b_start + chosen_ci]
-                deal_records[j].append((t_p, af_rec, mc_rec, is_take))
+                deal_records[j].append((node_k, t_p, af_rec, mc_rec, is_take))
                 if is_take:
                     taker_af[j] = af_rec
                 d.bid(chosen)
@@ -441,7 +447,12 @@ def collect_sweep_batched(
                         dist_passes[wd] += 1
                         dist_totals[wd] += 1
 
-            for t_p, af, mc, is_take in deal_records[j]:
+            # Only record decisions at k >= exp_node[j] (or all if no deviation happened)
+            # so every V(Pass) label sees a 100% greedy, zero-suicide-take continuation!
+            min_rec_k = exp_node[j] if had_explore[j] else 0
+            for rec_k, t_p, af, mc, is_take in deal_records[j]:
+                if rec_k < min_rec_k:
+                    continue
                 af_list.append(af)
                 mc_list.append(mc)
                 act_list.append(is_take)
@@ -662,8 +673,8 @@ def main() -> None:
             train_don(don, X_mix, Y_mix, device, seed=args.seed + sweep, epochs=6, lr=6e-4)
 
         export_bid_bundle(bundle_path, don, bidnet, buckets, table)
-        ev_p = eval_bid_bundle_cpp(bundle_path, play_spec, config, pairs=args.eval_pairs, mixed_partner=False, seed=700 + sweep, threads=args.threads)
-        ev_m = eval_bid_bundle_cpp(bundle_path, play_spec, config, pairs=args.eval_pairs, mixed_partner=True, seed=800 + sweep, threads=args.threads)
+        ev_p = eval_bid_bundle_cpp(bundle_path, play_spec, config, pairs=args.eval_pairs, mixed_partner=False, seed=700, threads=args.threads)
+        ev_m = eval_bid_bundle_cpp(bundle_path, play_spec, config, pairs=args.eval_pairs, mixed_partner=True, seed=701, threads=args.threads)
         print(
             f"   Sweep {sweep}/{args.sweeps} ({time.perf_counter() - t_s:.1f}s | {len(TGT):,} dec | mse={np.mean(bn_losses):.4f} | "
             f"pass={100*0.5*(emp_dist.pass_prob[0]+emp_dist.pass_prob[1]):.1f}%): "

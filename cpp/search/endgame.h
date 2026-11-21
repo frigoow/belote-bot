@@ -46,6 +46,10 @@ struct EndgameResult {
 // Solves the given deal exactly under perfect information. Must be in kPlay.
 EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options = {});
 
+// Fast single-value exact minimax solve (returns value from Team 0's perspective).
+// Faster than solveEndgame() when per-move root scores are not needed (e.g. rollout finish).
+int solveEndgameValue(const Deal& deal, const EndgameOptions& options = {});
+
 // Plays an explicit sequence of legal cards to completion through the endgame
 // solver's internal state and leaf evaluator (returns Team 0 minus Team 1
 // score). Used to verify early-deal root setup (pending announcements, shows,

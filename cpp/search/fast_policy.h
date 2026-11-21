@@ -54,6 +54,7 @@ private:
 struct HybridOptions {
     int worlds = 64;                 // max worlds (or fixed worlds if race == false)
     int ab_handoff_trick = 4;        // >= 0: exact AB endgame from this trick on
+    int rollout_ab_trick = -1;       // >= 0: finish early-trick rollouts with exact AB at this trick (e.g. 6 = 8 cards)
     bool weight_play_history = true; // weight sampled worlds by FastPolicy play likelihood
     double play_lik_temp = 1.0;      // softmax temperature for play-history log-likelihood
     bool race = false;               // Manille-style CRN paired-z candidate racing
