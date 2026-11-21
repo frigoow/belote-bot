@@ -1,0 +1,201 @@
+#include "bg/batch_env.h"
+#include "bg/agent.h"
+#include "bg/rule_policy.h"
+
+#include <algorithm>
+#include <numeric>
+#include <stdexcept>
+#include <thread>
+
+namespace bg {
+
+BgBatchPlayEnv::BgBatchPlayEnv(int num_envs, std::uint64_t seed, double bid_noise, double hanging_prob, int threads)
+    : num_envs_(num_envs), threads_(std::max(1, threads)), bid_noise_(bid_noise), hanging_prob_(hanging_prob),
+      rngs_(std::size_t(num_envs)), cached_legal_(std::size_t(num_envs)), cached_n_legal_(std::size_t(num_envs), 0) {
+    if (num_envs <= 0) throw std::invalid_argument("BgBatchPlayEnv: num_envs must be > 0");
+    resetAll(seed);
+}
+
+Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+    std::array<int, kCards> deck;
+    std::iota(deck.begin(), deck.end(), 0);
+
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        std::shuffle(deck.begin(), deck.end(), rng);
+        const int first = int(rng() % kPlayers);
+        int hanging = 0;
+        if (hanging_prob_ > 0.0 && u(rng) < hanging_prob_) {
+            static constexpr int kHangChoices[5] = {8, 10, 13, 16, 26};
+            hanging = kHangChoices[rng() % 5];
+        }
+        Round r(deck, first, hanging);
+        while (r.decision() == Round::Decision::kBid) {
+            std::uint8_t bid = naturalBid(r);
+            if (bid_noise_ > 0.0 && u(rng) < bid_noise_) {
+                const std::uint8_t avail = r.availableBids();
+                std::uint8_t opts[9];
+                int n = 0;
+                opts[n++] = kPass;
+                for (int b = 0; b < 8; ++b) {
+                    const std::uint8_t f = std::uint8_t(1u << b);
+                    if (avail & f) opts[n++] = f;
+                }
+                if (n > 1) bid = opts[rng() % std::uint64_t(n)];
+            }
+            r.bid(bid);
+        }
+        if (r.finished()) continue;
+        while (r.decision() == Round::Decision::kAnnounce) {
+            r.declare(chooseDeclarations(r.offeredAnnounces()));
+        }
+        if (r.decision() == Round::Decision::kPlay) return r;
+    }
+    throw std::runtime_error("BgBatchPlayEnv: failed to generate non-passed deal");
+}
+
+void BgBatchPlayEnv::cacheLegal(int env) {
+    const Mask legal = deals_[std::size_t(env)].legalMoves();
+    auto& arr = cached_legal_[std::size_t(env)];
+    arr.fill(-1);
+    int n = 0;
+    for (Mask m = legal; m && n < kBgMaxLegal; m &= m - 1) arr[std::size_t(n++)] = lowestCard(m);
+    cached_n_legal_[std::size_t(env)] = n;
+}
+
+void BgBatchPlayEnv::resetAll(std::uint64_t seed) {
+    deals_.clear();
+    deals_.reserve(std::size_t(num_envs_));
+    for (int i = 0; i < num_envs_; ++i) {
+        rngs_[std::size_t(i)].seed(seed * 0x9E3779B97F4A7C15ull + std::uint64_t(i + 1) * 0xBF58476D1CE4E5B9ull);
+        deals_.push_back(makeFreshDeal(rngs_[std::size_t(i)]));
+        cacheLegal(i);
+    }
+}
+
+void BgBatchPlayEnv::observeBatch(float* state, float* history, std::int32_t* n_plies, float* legal_actions,
+                                  std::int32_t* legal_cards, std::int32_t* n_legal, std::int32_t* current_team,
+                                  std::uint8_t* contract_out, std::int8_t* belief_targets, float* belief_marginals,
+                                  std::uint8_t* belief_allowed) const {
+    auto worker = [&](int begin, int end) {
+        for (int b = begin; b < end; ++b) {
+            const Round& r = deals_[std::size_t(b)];
+            const int me = r.toMove();
+            const PublicState ps = publicState(r, me);
+            const std::uint8_t contract = ps.contract;
+
+            const bool need_sampler = (belief_marginals != nullptr || belief_allowed != nullptr);
+            if (need_sampler) {
+                const DealSampler sampler(ps);
+                encodeState(ps, state + std::size_t(b) * kBgStateDim, &sampler.facts());
+                const auto raw_marg = sampler.exactMarginals();
+                const auto& others = sampler.others();
+                // Map sampler's others_[k] (absolute order) -> relSeat(seat, me) - 1 (0=left, 1=partner, 2=right).
+                int k_to_rk[3];
+                for (int k = 0; k < 3; ++k) k_to_rk[k] = relSeat(others[std::size_t(k)], me) - 1;
+
+                float* bm_row = belief_marginals ? belief_marginals + std::size_t(b) * 32 * 3 : nullptr;
+                std::uint8_t* ba_row = belief_allowed ? belief_allowed + std::size_t(b) * 32 * 3 : nullptr;
+                if (bm_row) std::fill(bm_row, bm_row + 96, 0.0f);
+                if (ba_row) std::fill(ba_row, ba_row + 96, std::uint8_t(0));
+                for (int raw_c = 0; raw_c < kCards; ++raw_c) {
+                    const int cc = canonCard(raw_c, contract);
+                    for (int k = 0; k < 3; ++k) {
+                        const int rk = k_to_rk[k];
+                        const float p = float(raw_marg[std::size_t(raw_c)][std::size_t(k)]);
+                        if (bm_row) bm_row[cc * 3 + rk] = p;
+                        if (ba_row) ba_row[cc * 3 + rk] = p > 0.0f ? 1 : 0;
+                    }
+                }
+            } else {
+                encodeState(ps, state + std::size_t(b) * kBgStateDim, nullptr);
+            }
+
+            if (history) {
+                n_plies[b] = encodeHistory(ps, history + std::size_t(b) * kBgMaxPlies * kBgPlyDim);
+            } else if (n_plies) {
+                n_plies[b] = std::int32_t(ps.plays.size());
+            }
+
+            if (legal_actions && legal_cards) {
+                n_legal[b] = encodeLegalActions(ps, legal_actions + std::size_t(b) * kBgMaxLegal * kBgActionDim,
+                                                legal_cards + std::size_t(b) * kBgMaxLegal);
+            } else if (n_legal) {
+                n_legal[b] = cached_n_legal_[std::size_t(b)];
+            }
+
+            if (current_team) current_team[b] = teamOf(me);
+            if (contract_out) contract_out[b] = contract;
+
+            if (belief_targets) {
+                std::int8_t* bt_row = belief_targets + std::size_t(b) * 32;
+                std::fill(bt_row, bt_row + 32, std::int8_t(-1));
+                for (int rk = 0; rk < 3; ++rk) {
+                    const int seat = (me + 1 + rk) & 3;
+                    for (Mask m = r.hand(seat); m; m &= m - 1) {
+                        const int cc = canonCard(lowestCard(m), contract);
+                        bt_row[cc] = std::int8_t(rk);
+                    }
+                }
+            }
+        }
+    };
+
+    const int nt = std::min(threads_, num_envs_);
+    if (nt <= 1) {
+        worker(0, num_envs_);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(std::size_t(nt));
+    const int chunk = (num_envs_ + nt - 1) / nt;
+    for (int t = 0; t < nt; ++t) {
+        const int begin = t * chunk;
+        const int end = std::min(num_envs_, begin + chunk);
+        if (begin < end) pool.emplace_back(worker, begin, end);
+    }
+    for (auto& th : pool) th.join();
+}
+
+void BgBatchPlayEnv::stepBatch(const std::int32_t* action_idx, std::uint8_t* done_out, float* reward_t0_out) {
+    auto worker = [&](int begin, int end) {
+        for (int b = begin; b < end; ++b) {
+            Round& r = deals_[std::size_t(b)];
+            const int nl = cached_n_legal_[std::size_t(b)];
+            int idx = action_idx[b];
+            if (idx < 0 || idx >= nl) idx = 0;
+            const int card = cached_legal_[std::size_t(b)][std::size_t(idx)];
+            r.play(card, true);
+            while (r.decision() == Round::Decision::kAnnounce) {
+                r.declare(chooseDeclarations(r.offeredAnnounces()));
+            }
+            if (r.finished()) {
+                done_out[b] = 1;
+                const RoundResult& res = r.result();
+                reward_t0_out[b] = float(res.sn - res.ew) / 40.0f;
+                deals_[std::size_t(b)] = makeFreshDeal(rngs_[std::size_t(b)]);
+            } else {
+                done_out[b] = 0;
+                reward_t0_out[b] = 0.0f;
+            }
+            cacheLegal(b);
+        }
+    };
+
+    const int nt = std::min(threads_, num_envs_);
+    if (nt <= 1) {
+        worker(0, num_envs_);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(std::size_t(nt));
+    const int chunk = (num_envs_ + nt - 1) / nt;
+    for (int t = 0; t < nt; ++t) {
+        const int begin = t * chunk;
+        const int end = std::min(num_envs_, begin + chunk);
+        if (begin < end) pool.emplace_back(worker, begin, end);
+    }
+    for (auto& th : pool) th.join();
+}
+
+}  // namespace bg

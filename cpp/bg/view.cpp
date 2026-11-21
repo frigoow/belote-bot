@@ -156,6 +156,34 @@ std::vector<double> buildWays(const std::vector<std::uint8_t>& dom) {
     return w;
 }
 
+std::vector<double> buildWaysWeighted(const std::vector<std::uint8_t>& dom, const std::vector<int>& hidden,
+                                      const std::array<std::array<double, 3>, kCards>& weights) {
+    const std::size_t n = dom.size();
+    std::vector<double> w((n + 1) * 81, 0.0);
+    auto at = [&](std::size_t i, int a, int b) -> double& { return w[i * 81 + std::size_t(a * 9 + b)]; };
+    for (std::size_t i = n + 1; i-- > 0;) {
+        for (int a = 0; a <= 8; ++a) {
+            for (int b = 0; b <= 8; ++b) {
+                const int cc = int(n - i) - a - b;
+                double x = 0;
+                if (cc >= 0 && cc <= 8) {
+                    if (i == n) {
+                        x = (a == 0 && b == 0 && cc == 0) ? 1.0 : 0.0;
+                    } else {
+                        const std::uint8_t d = dom[i];
+                        const auto& cw = weights[std::size_t(hidden[i])];
+                        if ((d & 1) && a > 0) x += cw[0] * at(i + 1, a - 1, b);
+                        if ((d & 2) && b > 0) x += cw[1] * at(i + 1, a, b - 1);
+                        if ((d & 4) && cc > 0) x += cw[2] * at(i + 1, a, b);
+                    }
+                }
+                at(i, a, b) = x;
+            }
+        }
+    }
+    return w;
+}
+
 inline double waysAt(const std::vector<double>& w, std::size_t i, int a, int b) { return w[i * 81 + std::size_t(a * 9 + b)]; }
 
 // The cards a declaration of `type` could be: every run of its length, every carré rank.
@@ -250,6 +278,183 @@ DealSampler::DealSampler(const PublicState& ps) : ps_(ps), facts_(inferFacts(ps)
 }
 
 double DealSampler::ways(std::size_t i, int a, int b) const { return waysAt(ways_, i, a, b); }
+
+double DealSampler::count() const {
+    if (!placements_.empty()) return placement_total_;
+    return waysAt(ways_, 0, need_[0], need_[1]);
+}
+
+std::vector<Hands> DealSampler::enumerate(std::uint64_t cap) const {
+    const double total = count();
+    if (total <= 0.0 || total > double(cap)) return {};
+    bool needs_replay = false;
+    for (const Declared& d : ps_.declared) needs_replay = needs_replay || (d.seat != ps_.me);
+    std::vector<Hands> out;
+    out.reserve(static_cast<std::size_t>(total));
+
+    auto enumDom = [&](const std::vector<std::uint8_t>& dom) {
+        const auto tab = buildWays(dom);
+        Hands cur{};
+        cur[std::size_t(ps_.me)] = ps_.hand;
+        std::function<void(std::size_t, int, int)> dfs = [&](std::size_t i, int a, int b) {
+            if (out.size() > cap) return;
+            if (i == hidden_.size()) {
+                if (!needs_replay || replay(cur)) out.push_back(cur);
+                return;
+            }
+            const int cc = int(hidden_.size() - i) - a - b;
+            const std::uint8_t d = dom[i];
+            const Mask bit_c = bit(hidden_[i]);
+            if ((d & 1) && a > 0 && waysAt(tab, i + 1, a - 1, b) > 0) {
+                cur[std::size_t(others_[0])] |= bit_c;
+                dfs(i + 1, a - 1, b);
+                cur[std::size_t(others_[0])] &= ~bit_c;
+            }
+            if ((d & 2) && b > 0 && waysAt(tab, i + 1, a, b - 1) > 0) {
+                cur[std::size_t(others_[1])] |= bit_c;
+                dfs(i + 1, a, b - 1);
+                cur[std::size_t(others_[1])] &= ~bit_c;
+            }
+            if ((d & 4) && cc > 0 && waysAt(tab, i + 1, a, b) > 0) {
+                cur[std::size_t(others_[2])] |= bit_c;
+                dfs(i + 1, a, b);
+                cur[std::size_t(others_[2])] &= ~bit_c;
+            }
+        };
+        if (waysAt(tab, 0, need_[0], need_[1]) > 0) dfs(0, need_[0], need_[1]);
+    };
+
+    if (!placements_.empty()) {
+        // Deduplicate in case two declaration placements produce the same Hands.
+        for (const Placement& pl : placements_) enumDom(pl.domain);
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+    } else {
+        enumDom(domain_);
+    }
+    return out;
+}
+
+std::array<std::array<double, 3>, kCards> DealSampler::exactMarginals() const {
+    std::array<std::array<double, 3>, kCards> marg{};
+    const std::size_t n = hidden_.size();
+    if (n == 0) return marg;
+
+    auto accumDom = [&](const std::vector<std::uint8_t>& dom, double scale) {
+        const auto bwd = buildWays(dom);
+        const double tot = waysAt(bwd, 0, need_[0], need_[1]);
+        if (tot <= 0.0) return;
+        // Forward DP: fwd[i][a][b] = ways to assign cards 0..i-1 leaving capacities (a, b, cc).
+        std::vector<double> fwd((n + 1) * 81, 0.0);
+        auto fat = [&](std::size_t i, int a, int b) -> double& { return fwd[i * 81 + std::size_t(a * 9 + b)]; };
+        fat(0, need_[0], need_[1]) = 1.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::uint8_t d = dom[i];
+            const int c_card = hidden_[i];
+            double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+            for (int a = 0; a <= need_[0]; ++a) {
+                for (int b = 0; b <= need_[1]; ++b) {
+                    const double fv = fat(i, a, b);
+                    if (fv == 0.0) continue;
+                    const int cc = int(n - i) - a - b;
+                    if ((d & 1) && a > 0) {
+                        const double bv = waysAt(bwd, i + 1, a - 1, b);
+                        if (bv > 0.0) {
+                            fat(i + 1, a - 1, b) += fv;
+                            s0 += fv * bv;
+                        }
+                    }
+                    if ((d & 2) && b > 0) {
+                        const double bv = waysAt(bwd, i + 1, a, b - 1);
+                        if (bv > 0.0) {
+                            fat(i + 1, a, b - 1) += fv;
+                            s1 += fv * bv;
+                        }
+                    }
+                    if ((d & 4) && cc > 0) {
+                        const double bv = waysAt(bwd, i + 1, a, b);
+                        if (bv > 0.0) {
+                            fat(i + 1, a, b) += fv;
+                            s2 += fv * bv;
+                        }
+                    }
+                }
+            }
+            const double inv = scale / tot;
+            marg[std::size_t(c_card)][0] += s0 * inv;
+            marg[std::size_t(c_card)][1] += s1 * inv;
+            marg[std::size_t(c_card)][2] += s2 * inv;
+        }
+    };
+
+    if (!placements_.empty() && placement_total_ > 0.0) {
+        for (const Placement& pl : placements_) accumDom(pl.domain, pl.weight / placement_total_);
+    } else {
+        accumDom(domain_, 1.0);
+    }
+    return marg;
+}
+
+std::optional<Hands> DealSampler::sampleWeighted(std::mt19937_64& rng,
+                                                 const std::array<std::array<double, 3>, kCards>& weights,
+                                                 int max_tries) const {
+    bool needs_replay = false;
+    for (const Declared& d : ps_.declared) needs_replay = needs_replay || (d.seat != ps_.me);
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+
+    // Precompute weighted DP table(s).
+    std::vector<double> pl_weights;
+    double pl_tot = 0.0;
+    std::vector<double> base_tab;
+    if (!placements_.empty()) {
+        pl_weights.reserve(placements_.size());
+        for (const Placement& pl : placements_) {
+            const auto tab = buildWaysWeighted(pl.domain, hidden_, weights);
+            const double w = waysAt(tab, 0, need_[0], need_[1]);
+            pl_weights.push_back(w);
+            pl_tot += w;
+        }
+        if (pl_tot <= 0.0) return sample(rng, max_tries);
+    } else {
+        base_tab = buildWaysWeighted(domain_, hidden_, weights);
+        if (waysAt(base_tab, 0, need_[0], need_[1]) <= 0.0) return sample(rng, max_tries);
+    }
+
+    std::optional<Hands> last;
+    for (int t = 0; t < max_tries; ++t) {
+        const std::vector<std::uint8_t>* dom = &domain_;
+        const std::vector<double>* tab = &base_tab;
+        std::vector<double> local;
+        if (!placements_.empty()) {
+            double x = u(rng) * pl_tot;
+            std::size_t j = 0;
+            while (j + 1 < placements_.size() && x >= pl_weights[j]) x -= pl_weights[j++];
+            dom = &placements_[j].domain;
+            local = buildWaysWeighted(*dom, hidden_, weights);
+            tab = &local;
+        }
+        int a = need_[0], b = need_[1];
+        Hands h{};
+        h[std::size_t(ps_.me)] = ps_.hand;
+        for (std::size_t i = 0; i < hidden_.size(); ++i) {
+            const int cc = int(hidden_.size() - i) - a - b;
+            const std::uint8_t d = (*dom)[i];
+            const auto& cw = weights[std::size_t(hidden_[i])];
+            const double w0 = (d & 1) && a > 0 ? cw[0] * waysAt(*tab, i + 1, a - 1, b) : 0.0;
+            const double w1 = (d & 2) && b > 0 ? cw[1] * waysAt(*tab, i + 1, a, b - 1) : 0.0;
+            const double w2 = (d & 4) && cc > 0 ? cw[2] * waysAt(*tab, i + 1, a, b) : 0.0;
+            const double x = u(rng) * (w0 + w1 + w2);
+            int k = x < w0 ? 0 : x < w0 + w1 ? 1 : 2;
+            if (k == 2 && w2 <= 0) k = w1 > 0 ? 1 : 0;
+            h[std::size_t(others_[std::size_t(k)])] |= bit(hidden_[i]);
+            if (k == 0) --a;
+            else if (k == 1) --b;
+        }
+        last = h;
+        if (!needs_replay || replay(h)) return h;
+    }
+    return last;
+}
 
 std::optional<Hands> DealSampler::sampleUnchecked(std::mt19937_64& rng) const {
     const std::vector<std::uint8_t>* dom = &domain_;

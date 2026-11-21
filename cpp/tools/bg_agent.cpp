@@ -29,7 +29,10 @@ using namespace bg;
 int main(int argc, char** argv) {
     SearchOptions o;
     bool policy_only = false;
+    bool qgru_only = false;
+    bool fast_only = false;
     std::uint64_t seed = 0;
+    std::string fast_path, belief_path, qgru_path;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -37,9 +40,51 @@ int main(int argc, char** argv) {
         else if (a == "--exact-trick") o.root_exact_trick = std::stoi(next());
         else if (a == "--endgame") o.endgame_tricks = std::stoi(next());
         else if (a == "--lik") o.lik_eps = std::stod(next());
+        else if (a == "--auction") o.auction_weight = std::stod(next());
+        else if (a == "--pool") o.pool = std::stoi(next());
         else if (a == "--z") o.z = std::stod(next());
+        else if (a == "--margin") o.margin = std::stod(next());
+        else if (a == "--fast") fast_path = next();
+        else if (a == "--belief") belief_path = next();
+        else if (a == "--belief-temp") o.belief_temp = std::stod(next());
+        else if (a == "--qgru") qgru_path = next();
+        else if (a == "--q-blend") o.q_blend = std::stod(next());
+        else if (a == "--q-taper") o.q_taper_trick = std::stoi(next());
+        else if (a == "--fast-lik") o.fast_lik_weight = std::stod(next());
+        else if (a == "--fast-lik-temp") o.fast_lik_temp = std::stod(next());
+        else if (a == "--race") o.race = true;
+        else if (a == "--race-min") o.race_min = std::stoi(next());
+        else if (a == "--race-step") o.race_step = std::stoi(next());
+        else if (a == "--race-z") o.race_z = std::stod(next());
+        else if (a == "--match-equity") o.match_equity = true;
         else if (a == "--policy") policy_only = true;
+        else if (a == "--qgru-only") qgru_only = true;
+        else if (a == "--fast-only") fast_only = true;
         else if (a == "--seed") seed = std::stoull(next());
+    }
+    BgFastPolicyModel fast_model;
+    BgBeliefModel belief_model;
+    BgQGRUModel q_model;
+    if (!fast_path.empty()) {
+        if (!fast_model.load(fast_path)) {
+            std::cerr << "bg_agent: failed to load --fast " << fast_path << std::endl;
+            return 2;
+        }
+        o.fast_policy = &fast_model;
+    }
+    if (!belief_path.empty()) {
+        if (!belief_model.load(belief_path)) {
+            std::cerr << "bg_agent: failed to load --belief " << belief_path << std::endl;
+            return 2;
+        }
+        o.belief_model = &belief_model;
+    }
+    if (!qgru_path.empty()) {
+        if (!q_model.load(qgru_path)) {
+            std::cerr << "bg_agent: failed to load --qgru " << qgru_path << std::endl;
+            return 2;
+        }
+        o.q_model = &q_model;
     }
     std::mt19937_64 rng(seed ? seed : std::random_device{}());
     std::ios::sync_with_stdio(false);
@@ -78,7 +123,11 @@ int main(int argc, char** argv) {
         in >> ps.sn >> ps.ew >> ps.hanging;
         int card = kNoCard;
         try {
-            if (policy_only) {
+            if (qgru_only && q_model.loaded()) {
+                card = q_model.chooseCard(ps);
+            } else if (fast_only && fast_model.loaded()) {
+                card = fast_model.chooseCard(ps);
+            } else if (policy_only) {
                 DealSampler s(ps);
                 auto h = s.sample(rng);
                 auto r = h ? s.replay(*h) : std::nullopt;

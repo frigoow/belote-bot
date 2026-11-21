@@ -70,7 +70,12 @@ target_link_libraries(belote_rule_review PRIVATE belote_search)
 add_library(belote_bg STATIC
     bg/bg.cpp
     bg/view.cpp
+    bg/rule_policy.cpp
     bg/agent.cpp
+    bg/encoder.cpp
+    bg/batch_env.cpp
+    bg/neural.cpp
+    bg/match_equity.cpp
 )
 target_link_libraries(belote_bg PUBLIC belote_core Threads::Threads)
 target_compile_options(belote_bg PRIVATE ${BELOTE_WARNINGS})
@@ -80,6 +85,9 @@ add_test(NAME bg COMMAND belote_test_bg)
 add_executable(belote_test_bg_agent tests/test_bg_agent.cpp)
 target_link_libraries(belote_test_bg_agent PRIVATE belote_bg)
 add_test(NAME bg_agent COMMAND belote_test_bg_agent)
+add_executable(belote_test_bg_rule_policy tests/test_bg_rule_policy.cpp)
+target_link_libraries(belote_test_bg_rule_policy PRIVATE belote_bg)
+add_test(NAME bg_rule_policy COMMAND belote_test_bg_rule_policy)
 add_executable(bg_agent tools/bg_agent.cpp)
 target_link_libraries(bg_agent PRIVATE belote_bg)
 add_executable(bg_duel tools/bg_duel.cpp)
@@ -96,4 +104,6 @@ if(BELOTE_PYTHON)
     find_package(pybind11 CONFIG REQUIRED)
     pybind11_add_module(belote_cpp python/bindings.cpp)
     target_link_libraries(belote_cpp PRIVATE belote_search)
+    pybind11_add_module(bg_cpp python/bg_bindings.cpp)
+    target_link_libraries(bg_cpp PRIVATE belote_bg)
 endif()

@@ -1,22 +1,25 @@
 // Mirrored-deal duels between two configurations of our Bulgarian card player
-// (bg/agent.h), for fast tuning without the C# bridge. Bids come from a fixed
-// simple bidder, identical in both runs of a deal; the margin is A's
-// game points per deal.
+// (bg/agent.h), for fast tuning without the C# bridge. The default is natural
+// bidding. The margin is A's game points per deal.
 //
 // Usage: bg_duel --a "<opts>" --b "<opts>" [--deals N] [--seed S] [--threads T]
-// opts: "policy" or "w=24,exact=5,end=3,lik=1,z=1" (any subset).
+// opts: "policy" or "w=24,exact=5,end=3,lik=1,auction=0,z=1".
+// Append ",bid=simple" to either side to compare bidders on the same decks.
 
 #include "bg/agent.h"
+#include "bg/rule_policy.h"
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,17 +30,23 @@ namespace {
 
 struct Config {
     bool policy = false;
+    bool qonly = false;
+    bool fonly = false;
+    bool natural = true;
     SearchOptions o;
+    std::shared_ptr<BgFastPolicyModel> fast_model;
+    std::shared_ptr<BgBeliefModel> belief_model;
+    std::shared_ptr<BgQGRUModel> q_model;
 };
 
 Config parse(const std::string& s) {
     Config c;
-    if (s == "policy") {
-        c.policy = true;
-        return c;
-    }
     std::stringstream ss(s);
     for (std::string kv; std::getline(ss, kv, ',');) {
+        if (kv == "policy") { c.policy = true; continue; }
+        if (kv == "qonly") { c.qonly = true; continue; }
+        if (kv == "fonly") { c.fonly = true; continue; }
+        if (kv == "race") { c.o.race = true; continue; }
         const auto eq = kv.find('=');
         if (eq == std::string::npos) continue;
         const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
@@ -45,8 +54,34 @@ Config parse(const std::string& s) {
         else if (k == "exact") c.o.root_exact_trick = std::stoi(v);
         else if (k == "end") c.o.endgame_tricks = std::stoi(v);
         else if (k == "lik") c.o.lik_eps = std::stod(v);
-        else if (k == "z") c.o.z = std::stod(v);
+        else if (k == "auction") c.o.auction_weight = std::stod(v);
+        else if (k == "pool") c.o.pool = std::stoi(v);
+        else if (k == "bid") {
+            if (v != "natural" && v != "simple") throw std::invalid_argument("unknown bidder");
+            c.natural = v == "natural";
+        } else if (k == "z") c.o.z = std::stod(v);
         else if (k == "m") c.o.margin = std::stod(v);
+        else if (k == "fast") {
+            c.fast_model = std::make_shared<BgFastPolicyModel>();
+            if (!c.fast_model->load(v)) throw std::runtime_error("failed to load fast model: " + v);
+            c.o.fast_policy = c.fast_model.get();
+        } else if (k == "belief") {
+            c.belief_model = std::make_shared<BgBeliefModel>();
+            if (!c.belief_model->load(v)) throw std::runtime_error("failed to load belief model: " + v);
+            c.o.belief_model = c.belief_model.get();
+        } else if (k == "btemp") c.o.belief_temp = std::stod(v);
+        else if (k == "qgru") {
+            c.q_model = std::make_shared<BgQGRUModel>();
+            if (!c.q_model->load(v)) throw std::runtime_error("failed to load qgru model: " + v);
+            c.o.q_model = c.q_model.get();
+        } else if (k == "qblend") c.o.q_blend = std::stod(v);
+        else if (k == "qtaper") c.o.q_taper_trick = std::stoi(v);
+        else if (k == "flik") c.o.fast_lik_weight = std::stod(v);
+        else if (k == "ftemp") c.o.fast_lik_temp = std::stod(v);
+        else if (k == "race") c.o.race = (v != "0");
+        else if (k == "rmin") c.o.race_min = std::stoi(v);
+        else if (k == "rstep") c.o.race_step = std::stoi(v);
+        else if (k == "rz") c.o.race_z = std::stod(v);
     }
     return c;
 }
@@ -89,7 +124,10 @@ std::uint8_t simpleBid(const Round& r) {
 int play(const std::array<int, kCards>& deck, int first, const Config& a, const Config& b, bool a_team0,
          std::uint64_t seed, double* ms_a, long* cards_a) {
     Round r(deck, first);
-    while (r.decision() == Round::Decision::kBid) r.bid(simpleBid(r));
+    while (r.decision() == Round::Decision::kBid) {
+        const Config& bidder = ((teamOf(r.toMove()) == 0) == a_team0) ? a : b;
+        r.bid(bidder.natural ? naturalBid(r) : simpleBid(r));
+    }
     if (r.finished()) return 0;
     std::mt19937_64 rng(seed);
     while (!r.finished()) {
@@ -102,7 +140,13 @@ int play(const std::array<int, kCards>& deck, int first, const Config& a, const 
         const Config& c = is_a ? a : b;
         int card;
         const auto t0 = std::chrono::steady_clock::now();
-        if (c.policy || popcount(r.legalMoves()) == 1) {
+        if (popcount(r.legalMoves()) == 1) {
+            card = lowestCard(r.legalMoves());
+        } else if (c.qonly && c.q_model) {
+            card = c.q_model->chooseCard(publicState(r, seat));
+        } else if (c.fonly && c.fast_model) {
+            card = c.fast_model->chooseCard(publicState(r, seat));
+        } else if (c.policy) {
             card = rulePolicy(r);
         } else {
             SearchOptions o = c.o;
@@ -147,9 +191,12 @@ int main(int argc, char** argv) {
             std::array<int, kCards> deck;
             std::iota(deck.begin(), deck.end(), 0);
             std::shuffle(deck.begin(), deck.end(), rng);
-            Round probe(deck, i % 4);
-            while (probe.decision() == Round::Decision::kBid) probe.bid(simpleBid(probe));
-            if (probe.finished()) continue;
+            if (a.natural == b.natural) {
+                Round probe(deck, i % 4);
+                while (probe.decision() == Round::Decision::kBid)
+                    probe.bid(a.natural ? naturalBid(probe) : simpleBid(probe));
+                if (probe.finished()) continue;
+            }
             const std::uint64_t s = rng();
             const int x = play(deck, i % 4, a, b, true, s, &my_ms, &my_cards);
             const int y = play(deck, i % 4, a, b, false, s, &my_ms, &my_cards);
@@ -169,7 +216,7 @@ int main(int argc, char** argv) {
     double mean = 0, var = 0;
     for (double x : v) mean += x / double(v.size());
     for (double x : v) var += (x - mean) * (x - mean) / double(v.size() - 1);
-    std::printf("A[%s] vs B[%s]: %+.3f +- %.3f game points/deal over %zu mirrored deals, A %.2f ms/card\n", sa.c_str(),
+    std::printf("A[%s] vs B[%s]: %+.3f +- %.3f game points/deal over %zu mirrored deals, A %.5f ms/card\n", sa.c_str(),
                 sb.c_str(), mean, 1.96 * std::sqrt(var / double(v.size())), v.size(), ms / std::max(1L, cards));
     return 0;
 }

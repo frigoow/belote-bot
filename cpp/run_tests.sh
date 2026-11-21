@@ -20,7 +20,7 @@ done
 # Bulgarian Belot engine, sampler, agent and tools.
 "$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tools/bg_agent.cpp" -o "$out/bg_agent"
 "$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tools/bg_duel.cpp" -o "$out/bg_duel"
-for test in bg bg_agent; do
+for test in bg bg_agent bg_rule_policy; do
     "$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tests/test_$test.cpp" -o "$out/test_$test"
     "$out/test_$test" || status=1
 done

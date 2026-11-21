@@ -70,6 +70,18 @@ public:
     std::optional<Hands> sampleUnchecked(std::mt19937_64& rng) const;
     // Uniform over the consistent hands (declarations checked by replay).
     std::optional<Hands> sample(std::mt19937_64& rng, int max_tries = 300) const;
+    // Weighted Belief-DP draw over the consistent hands using per-card seat
+    // weights[card][k] for k in {0,1,2} -> others_[k] (Manille v1.2.3 Belief-DP).
+    std::optional<Hands> sampleWeighted(std::mt19937_64& rng,
+                                        const std::array<std::array<double, 3>, kCards>& weights,
+                                        int max_tries = 300) const;
+    // Number of admitted deals (before declaration replay check).
+    double count() const;
+    // Exact enumeration of all consistent worlds when count() <= cap (empty if > cap).
+    std::vector<Hands> enumerate(std::uint64_t cap) const;
+    // Exact analytical uniform marginals P(card -> others_[k]) via forward-backward DP (~2 us).
+    std::array<std::array<double, 3>, kCards> exactMarginals() const;
+    const std::array<int, 3>& others() const { return others_; }
     // The deal replayed up to the observer's decision, or nothing if the hands
     // contradict the public record.
     std::optional<Round> replay(const Hands& hands) const;
