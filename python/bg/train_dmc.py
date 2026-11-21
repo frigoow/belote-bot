@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import math
+import sys
 import time
 from pathlib import Path
 
@@ -281,8 +283,31 @@ def main() -> None:
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--save", type=Path, default=Path("checkpoints/bg_q_gru.pt"))
     ap.add_argument("--export-dir", type=Path, default=Path("checkpoints/bg_models"))
+    ap.add_argument("--log-file", type=Path, default=None, help="Log file path (defaults to runs/<save_stem>_<ts>.log)")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
+
+    log_path = args.log_file
+    if log_path is None:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = Path("runs") / f"{args.save.stem}_{ts}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = log_path.open("a", buffering=1)
+
+    class _Tee:
+        def __init__(self, *streams):
+            self._streams = streams
+        def write(self, data):
+            for s in self._streams:
+                s.write(data)
+            return len(data)
+        def flush(self):
+            for s in self._streams:
+                s.flush()
+
+    sys.stdout = _Tee(sys.stdout, log_fh)
+    sys.stderr = _Tee(sys.stderr, log_fh)
+    print(f"Logging training run to {log_path}", flush=True)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
