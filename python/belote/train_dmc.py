@@ -1,28 +1,24 @@
-"""M2 Dueling DMC self-play trainer for CardQMLP / CardQGRU, BeliefNet B_phi, and FastPolicy.
+"""M2 GPU-resident BF16 Dueling DMC trainer for CardQMLP / CardQGRU, BeliefNet B_phi, and FastPolicy.
 
-Key design choices (DouZero / Manille v1.2.3 adapted for Belote's nat cliff):
-- Dueling Q(s, a) = V(s) + A(s, a) - mean_{a' in legal} A(s, a'): V(s) absorbs
-  the massive +-16-unit nat-cliff state variance so A(s, a) cleanly separates
-  legal card choices.
-- Exact MSE loss on realized deal recorded-unit margin (r = (rec_us - rec_them) / 25).
-- Fresh on-policy 512-deal batches (~10k decisions/round) with DouZero-style
-  low epsilon (0.08 -> 0.015) so random blunders don't poison the nat cliff.
-- Bid-jittered Rule Bidder deals so card play generalizes across contracts.
+Key optimizations for RTX 3060 (12 GB VRAM) + 16 CPU cores:
+- GPU-resident BF16 episode buffers eliminate per-minibatch CPU->GPU copies.
+- Ply-bucketed GRU training (4 trick-pair buckets) halves average GRU sequence
+  length while keeping exact chronological hidden states.
+- Active-action trimming in DuelingQHead skips padded legal-move slots.
+- Dueling Q(s, a) = V(s) + A(s, a) - mean_{a' in legal} A(s, a') with exact MSE
+  loss and DouZero-style low epsilon (0.08 -> 0.015).
 
 Usage examples:
-  # 1. Dueling Q-MLP baseline (500k deals, ~2-3 min on RTX 3060)
+  # Full Dueling Q-GRU + BeliefNet B_phi + distilled 256x128 FastPolicy
   PYTHONPATH=build:python .venv/bin/python -m belote.train_dmc \
-      --arch mlp --episodes 500000 --envs 512 --save checkpoints/q_mlp.pt
-
-  # 2. Full Dueling Q-GRU blueprint + BeliefNet B_phi + distilled 256x128 FastPolicy
-  PYTHONPATH=build:python .venv/bin/python -m belote.train_dmc \
-      --arch gru --episodes 1000000 --envs 512 --train-belief --distill-fast \
-      --save checkpoints/q_gru.pt
+      --arch gru --episodes 1000000 --envs 1024 --train-belief --distill-fast \
+      --save checkpoints/q_gru_1m.pt
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import time
 from pathlib import Path
@@ -37,57 +33,87 @@ from belote.eval_play import eval_belief_per_trick, eval_vs_cpp_agent
 from belote.models import BeliefNet, FastPolicy, build_q_model
 
 
-def collect_episodes(
+def _autocast(device: torch.device):
+    if device.type == "cuda":
+        return torch.amp.autocast("cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
+
+class EpisodeBuffers:
+    """Pre-allocated GPU-resident buffers for one synchronized B-deal rollout."""
+
+    def __init__(self, bsz: int, device: torch.device, use_hist: bool, include_beliefs: bool):
+        self.bsz = bsz
+        self.device = device
+        self.use_hist = use_hist
+        self.include_beliefs = include_beliefs
+        dt = torch.bfloat16 if device.type == "cuda" else torch.float32
+
+        self.states = torch.empty((32, bsz, bc.STATE_DIM), dtype=dt, device=device)
+        self.legal_actions = torch.empty((32, bsz, bc.MAX_LEGAL, bc.ACTION_DIM), dtype=dt, device=device)
+        self.n_legal = torch.empty((32, bsz), dtype=torch.int8, device=device)
+        self.chosen_idx = torch.empty((32, bsz), dtype=torch.int8, device=device)
+        self.teams = torch.empty((32, bsz), dtype=torch.int8, device=device)
+        self.returns = torch.empty((32, bsz), dtype=torch.float32, device=device)
+        self.n_plies = torch.arange(32, dtype=torch.int32, device=device).unsqueeze(1).expand(32, bsz).contiguous()
+        if use_hist:
+            self.hists = torch.zeros((32, bsz, bc.MAX_PLIES, bc.PLY_DIM), dtype=dt, device=device)
+        else:
+            self.hists = None
+        if include_beliefs:
+            self.bt = torch.empty((32, bsz, 32), dtype=torch.int8, device=device)
+            self.ba = torch.empty((32, bsz, 32, 3), dtype=torch.uint8, device=device)
+        else:
+            self.bt = None
+            self.ba = None
+
+
+def collect_episodes_gpu(
     env: bc.BatchPlayEnv,
     q_model: nn.Module,
-    device: torch.device,
+    buf: EpisodeBuffers,
     eps: float,
-    use_hist: bool,
-    include_beliefs: bool,
+    collect_beliefs: bool,
     rng: np.random.Generator,
-) -> dict[str, np.ndarray]:
-    """Runs all B envs through exactly one complete 32-ply deal each."""
+) -> None:
+    """Runs all B envs through one synchronized 32-ply deal directly into GPU buffers."""
     bsz = env.num_envs
+    device = buf.device
     q_uses_hist = q_model.arch == "gru"
-    states_buf = np.empty((32, bsz, bc.STATE_DIM), dtype=np.float32)
-    hists_buf = np.empty((32, bsz, bc.MAX_PLIES, bc.PLY_DIM), dtype=np.float32) if use_hist else None
-    nplies_buf = np.empty((32, bsz), dtype=np.int32) if use_hist else None
-    legal_acts_buf = np.empty((32, bsz, bc.MAX_LEGAL, bc.ACTION_DIM), dtype=np.float32)
-    chosen_idx_buf = np.empty((32, bsz), dtype=np.int8)
-    team_buf = np.empty((32, bsz), dtype=np.int8)
-    nlegal_buf = np.empty((32, bsz), dtype=np.int8)
-    bt_buf = np.empty((32, bsz, 32), dtype=np.int8) if include_beliefs else None
-    ba_buf = np.empty((32, bsz, 32, 3), dtype=np.uint8) if include_beliefs else None
+    need_hist = q_uses_hist or collect_beliefs
+    idx_range = torch.arange(bc.MAX_LEGAL, device=device).unsqueeze(0)
 
     q_model.eval()
-    idx_range = torch.arange(bc.MAX_LEGAL, device=device).unsqueeze(0)
     final_rew_t0 = np.zeros(bsz, dtype=np.float32)
-    with torch.no_grad():
+    with torch.no_grad(), _autocast(device):
         for ply in range(32):
-            batch = env.observe_batch(include_history=use_hist, include_beliefs=include_beliefs)
-            states = batch["state"]
-            legal_actions = batch["legal_actions"]
-            n_legal = batch["n_legal"]
-            cur_team = batch["current_team"]
+            batch = env.observe_batch(include_history=need_hist, include_beliefs=collect_beliefs)
+            s_t = torch.from_numpy(batch["state"]).to(device, non_blocking=True)
+            a_t = torch.from_numpy(batch["legal_actions"]).to(device, non_blocking=True)
+            nl_np = batch["n_legal"]
+            nl_t = torch.from_numpy(nl_np).to(device, non_blocking=True)
+            ct_t = torch.from_numpy(batch["current_team"]).to(device, non_blocking=True)
 
-            states_buf[ply] = states
-            legal_acts_buf[ply] = legal_actions
-            team_buf[ply] = cur_team.astype(np.int8)
-            nlegal_buf[ply] = n_legal.astype(np.int8)
-            if use_hist:
-                hists_buf[ply] = batch["history"]
-                nplies_buf[ply] = batch["n_plies"]
-            if include_beliefs:
-                bt_buf[ply] = batch["belief_targets"]
-                ba_buf[ply] = batch["belief_allowed"]
+            buf.states[ply].copy_(s_t)
+            buf.legal_actions[ply].copy_(a_t)
+            buf.n_legal[ply].copy_(nl_t)
+            buf.teams[ply].copy_(ct_t)
 
-            s_t = torch.from_numpy(states).to(device, non_blocking=True)
-            a_t = torch.from_numpy(legal_actions).to(device, non_blocking=True)
-            valid = idx_range < torch.from_numpy(n_legal).to(device, non_blocking=True).unsqueeze(1)
+            if need_hist and ply > 0:
+                h_slice = torch.from_numpy(batch["history"][:, :ply, :]).to(device, non_blocking=True)
+                buf.hists[ply, :, :ply, :].copy_(h_slice)
+            else:
+                h_slice = None
+
+            if collect_beliefs:
+                buf.bt[ply].copy_(torch.from_numpy(batch["belief_targets"]).to(device, non_blocking=True))
+                buf.ba[ply].copy_(torch.from_numpy(batch["belief_allowed"]).to(device, non_blocking=True))
+
+            valid = idx_range < nl_t.unsqueeze(1)
             if q_uses_hist:
-                h_t = torch.from_numpy(batch["history"]).to(device, non_blocking=True)
-                np_t = torch.from_numpy(batch["n_plies"]).to(device, non_blocking=True)
-                q_vals = q_model(s_t, a_t, h_t, np_t, valid_mask=valid)
+                np_t = buf.n_plies[ply]
+                h_in = h_slice if h_slice is not None else buf.hists[0, :, :1, :]
+                q_vals = q_model(s_t, a_t, h_in, np_t, valid_mask=valid)
             else:
                 q_vals = q_model(s_t, a_t, valid_mask=valid)
 
@@ -95,46 +121,28 @@ def collect_episodes(
             greedy = q_vals.argmax(dim=-1).cpu().numpy().astype(np.int32)
 
             if eps > 0.0:
-                explore = (rng.random(bsz) < eps) & (n_legal > 1)
-                rand_idx = (rng.integers(0, 10000, size=bsz) % n_legal).astype(np.int32)
+                explore = (rng.random(bsz) < eps) & (nl_np > 1)
+                rand_idx = (rng.integers(0, 10000, size=bsz) % nl_np).astype(np.int32)
                 action_idx = np.where(explore, rand_idx, greedy)
             else:
                 action_idx = greedy
 
-            chosen_idx_buf[ply] = action_idx.astype(np.int8)
+            buf.chosen_idx[ply].copy_(torch.from_numpy(action_idx.astype(np.int8)).to(device, non_blocking=True))
             done, rew_t0 = env.step_batch(action_idx)
             if ply == 31:
                 assert np.all(done == 1), "Expected all synchronized deals to finish on ply 31"
                 final_rew_t0 = rew_t0
 
-    signs = np.where(team_buf == 0, 1.0, -1.0).astype(np.float32)
-    returns = signs * final_rew_t0[None, :]
-
-    decision_mask = (nlegal_buf > 1).reshape(-1)
-    out = {
-        "q_states": states_buf.reshape(-1, bc.STATE_DIM)[decision_mask],
-        "q_legal_actions": legal_acts_buf.reshape(-1, bc.MAX_LEGAL, bc.ACTION_DIM)[decision_mask],
-        "q_nlegal": nlegal_buf.reshape(-1)[decision_mask],
-        "q_chosen_idx": chosen_idx_buf.reshape(-1)[decision_mask],
-        "q_returns": returns.reshape(-1)[decision_mask],
-    }
-    if q_uses_hist:
-        out["q_hists"] = hists_buf.reshape(-1, bc.MAX_PLIES, bc.PLY_DIM)[decision_mask]
-        out["q_nplies"] = nplies_buf.reshape(-1)[decision_mask]
-    if include_beliefs:
-        out["b_states"] = states_buf.reshape(-1, bc.STATE_DIM)
-        out["b_hists"] = hists_buf.reshape(-1, bc.MAX_PLIES, bc.PLY_DIM)
-        out["b_nplies"] = nplies_buf.reshape(-1)
-        out["b_targets"] = bt_buf.reshape(-1, 32)
-        out["b_allowed"] = ba_buf.reshape(-1, 32, 3)
-    return out
+    r0_t = torch.from_numpy(final_rew_t0).to(device, non_blocking=True)  # (B,)
+    signs = torch.where(buf.teams == 0, 1.0, -1.0).to(torch.float32)
+    buf.returns.copy_(signs * r0_t.unsqueeze(0))
 
 
 def distill_fast_policy(
     q_model: nn.Module,
     device: torch.device,
     num_deals: int = 50000,
-    batch_envs: int = 256,
+    batch_envs: int = 512,
     epochs: int = 6,
     temperature: float = 0.04,
     save_bin: Path | None = None,
@@ -146,18 +154,19 @@ def distill_fast_policy(
     fast = FastPolicy().to(device)
     opt = torch.optim.AdamW(fast.parameters(), lr=1.5e-3, weight_decay=1e-4)
 
-    env = bc.BatchPlayEnv(num_envs=batch_envs, config=bc.Config.belgian(), seed=777, bid_jitter=0.6)
+    env = bc.BatchPlayEnv(num_envs=batch_envs, config=bc.Config.belgian(), seed=777, bid_jitter=0.6, threads=8)
     n_rounds = max(1, num_deals // batch_envs)
     idx_range = torch.arange(bc.MAX_LEGAL, device=device).unsqueeze(0)
+    empty_h = torch.zeros((batch_envs, 1, bc.PLY_DIM), dtype=torch.float32, device=device)
 
     states_all = []
     legal_masks_all = []
     target_probs_all = []
 
     t0 = time.perf_counter()
-    with torch.no_grad():
+    with torch.no_grad(), _autocast(device):
         for _ in range(n_rounds):
-            for _ply in range(32):
+            for ply in range(32):
                 batch = env.observe_batch(include_history=use_hist, include_beliefs=False)
                 s_np = batch["state"]
                 la_np = batch["legal_actions"]
@@ -168,13 +177,13 @@ def distill_fast_policy(
                 a_t = torch.from_numpy(la_np).to(device)
                 valid = idx_range < torch.from_numpy(nl_np).to(device).unsqueeze(1)
                 if use_hist:
-                    h_t = torch.from_numpy(batch["history"]).to(device)
-                    np_t = torch.from_numpy(batch["n_plies"]).to(device)
+                    h_t = torch.from_numpy(batch["history"][:, :ply, :]).to(device) if ply > 0 else empty_h
+                    np_t = torch.full((batch_envs,), ply, dtype=torch.int32, device=device)
                     q = q_model(s_t, a_t, h_t, np_t, valid_mask=valid)
                 else:
                     q = q_model(s_t, a_t, valid_mask=valid)
 
-                q = q.masked_fill(~valid, -1e9)
+                q = q.float().masked_fill(~valid, -1e9)
                 probs = F.softmax(q / temperature, dim=-1).cpu().numpy()
                 greedy = q.argmax(dim=-1).cpu().numpy().astype(np.int32)
 
@@ -237,23 +246,25 @@ def distill_fast_policy(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arch", choices=("mlp", "gru"), default="mlp")
-    ap.add_argument("--episodes", type=int, default=500000)
-    ap.add_argument("--envs", type=int, default=512)
+    ap.add_argument("--arch", choices=("mlp", "gru"), default="gru")
+    ap.add_argument("--episodes", type=int, default=1000000)
+    ap.add_argument("--envs", type=int, default=1024)
+    ap.add_argument("--env-threads", type=int, default=8)
     ap.add_argument("--batch-size", type=int, default=1024)
-    ap.add_argument("--epochs-per-round", type=int, default=2)
-    ap.add_argument("--lr", type=float, default=4e-4)
+    ap.add_argument("--epochs-per-round", type=int, default=1)
+    ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--eps-start", type=float, default=0.08)
     ap.add_argument("--eps-end", type=float, default=0.015)
     ap.add_argument("--bid-jitter", type=float, default=0.8)
-    ap.add_argument("--eval-every", type=int, default=100000)
+    ap.add_argument("--eval-every", type=int, default=200000)
     ap.add_argument("--eval-decks", type=int, default=250)
     ap.add_argument("--train-belief", action="store_true")
+    ap.add_argument("--belief-every", type=int, default=4, help="Train BeliefNet every N rounds")
     ap.add_argument("--distill-fast", action="store_true")
     ap.add_argument("--distill-deals", type=int, default=50000)
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--save", type=Path, default=Path("checkpoints/q_model.pt"))
+    ap.add_argument("--save", type=Path, default=Path("checkpoints/q_gru.pt"))
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -286,14 +297,17 @@ def main() -> None:
         seed=args.seed,
         bid_threshold=5.0,
         bid_jitter=args.bid_jitter,
+        threads=args.env_threads,
     )
+    buf = EpisodeBuffers(args.envs, device, use_hist=use_hist, include_beliefs=args.train_belief)
     rng = np.random.default_rng(args.seed)
     idx_range = torch.arange(bc.MAX_LEGAL, device=device).unsqueeze(0)
 
     print(
-        f"Training Dueling {args.arch.upper()} on {device} | envs={args.envs} | target={args.episodes:,} deals | "
-        f"eps={args.eps_start}->{args.eps_end} | lr={args.lr} | "
-        f"params={sum(p.numel() for p in q_model.parameters()):,} | belief={args.train_belief}",
+        f"Training GPU-BF16 Dueling {args.arch.upper()} on {device} | envs={args.envs} | "
+        f"target={args.episodes:,} deals | eps={args.eps_start}->{args.eps_end} | lr={args.lr} | "
+        f"ep/rnd={args.epochs_per_round} | params={sum(p.numel() for p in q_model.parameters()):,} | "
+        f"belief={args.train_belief}(1/{args.belief_every})",
         flush=True,
     )
     t_start = time.perf_counter()
@@ -303,59 +317,77 @@ def main() -> None:
     best_score = -1e9
     args.save.parent.mkdir(parents=True, exist_ok=True)
 
+    ply_buckets = ((0, 8), (8, 16), (16, 24), (24, 32)) if args.arch == "gru" else ((0, 32),)
+
     for rnd in range(1, total_rounds + 1):
         frac = rnd / total_rounds
         eps = args.eps_start + (args.eps_end - args.eps_start) * min(1.0, frac / 0.90)
-        data = collect_episodes(env, q_model, device, eps, use_hist, args.train_belief, rng)
+        do_belief = args.train_belief and (rnd % args.belief_every == 0)
+        collect_episodes_gpu(env, q_model, buf, eps, do_belief, rng)
         episodes_done += args.envs
 
         q_model.train()
-        n_q = len(data["q_returns"])
         q_losses = []
         for _ in range(args.epochs_per_round):
-            perm = rng.permutation(n_q)
-            for s in range(0, n_q, args.batch_size):
-                idx = perm[s : s + args.batch_size]
-                sb = torch.from_numpy(data["q_states"][idx]).to(device, non_blocking=True)
-                lab = torch.from_numpy(data["q_legal_actions"][idx]).to(device, non_blocking=True)
-                nlb = torch.from_numpy(data["q_nlegal"][idx]).to(device, non_blocking=True)
-                cib = torch.from_numpy(data["q_chosen_idx"][idx]).long().to(device, non_blocking=True)
-                rb = torch.from_numpy(data["q_returns"][idx]).to(device, non_blocking=True)
-                valid = idx_range < nlb.unsqueeze(1)
+            for p_lo, p_hi in ply_buckets:
+                mask = (buf.n_legal[p_lo:p_hi] > 1).reshape(-1)
+                valid_idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
+                if len(valid_idx) == 0:
+                    continue
+                perm = valid_idx[torch.randperm(len(valid_idx), device=device)]
+                sb_all = buf.states[p_lo:p_hi].reshape(-1, bc.STATE_DIM)
+                lab_all = buf.legal_actions[p_lo:p_hi].reshape(-1, bc.MAX_LEGAL, bc.ACTION_DIM)
+                nlb_all = buf.n_legal[p_lo:p_hi].reshape(-1)
+                cib_all = buf.chosen_idx[p_lo:p_hi].reshape(-1)
+                rb_all = buf.returns[p_lo:p_hi].reshape(-1)
                 if args.arch == "gru":
-                    hb = torch.from_numpy(data["q_hists"][idx]).to(device, non_blocking=True)
-                    npb = torch.from_numpy(data["q_nplies"][idx]).to(device, non_blocking=True)
-                    q_all = q_model(sb, lab, hb, npb, valid_mask=valid)
-                else:
-                    q_all = q_model(sb, lab, valid_mask=valid)
-                pred = q_all[torch.arange(len(idx), device=device), cib]
-                loss = F.mse_loss(pred, rb)
-                q_opt.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(q_model.parameters(), 2.0)
-                q_opt.step()
-                q_losses.append(float(loss.item()))
+                    t_max = max(1, p_hi - 1)
+                    hb_all = buf.hists[p_lo:p_hi, :, :t_max, :].reshape(-1, t_max, bc.PLY_DIM)
+                    npb_all = buf.n_plies[p_lo:p_hi].reshape(-1)
+
+                for s in range(0, len(perm), args.batch_size):
+                    mb = perm[s : s + args.batch_size]
+                    sb = sb_all[mb]
+                    lab = lab_all[mb]
+                    nlb = nlb_all[mb]
+                    cib = cib_all[mb].long()
+                    rb = rb_all[mb]
+                    valid = idx_range < nlb.unsqueeze(1)
+                    with _autocast(device):
+                        if args.arch == "gru":
+                            q_all = q_model(sb, lab, hb_all[mb], npb_all[mb], valid_mask=valid)
+                        else:
+                            q_all = q_model(sb, lab, valid_mask=valid)
+                        pred = q_all[torch.arange(len(mb), device=device), cib]
+                        loss = F.mse_loss(pred.float(), rb)
+                    q_opt.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(q_model.parameters(), 2.0)
+                    q_opt.step()
+                    q_losses.append(float(loss.item()))
         q_sched.step()
         cur_ql = float(np.mean(q_losses))
         ema_q_loss = cur_ql if ema_q_loss == 0.0 else 0.95 * ema_q_loss + 0.05 * cur_ql
 
-        if belief_net is not None:
+        if do_belief and belief_net is not None:
             belief_net.train()
-            n_b = len(data["b_states"])
-            perm = rng.permutation(n_b)
-            for s in range(0, n_b, args.batch_size):
-                idx = perm[s : s + args.batch_size]
-                sb = torch.from_numpy(data["b_states"][idx]).to(device, non_blocking=True)
-                hb = torch.from_numpy(data["b_hists"][idx]).to(device, non_blocking=True)
-                npb = torch.from_numpy(data["b_nplies"][idx]).to(device, non_blocking=True)
-                bt = torch.from_numpy(data["b_targets"][idx]).long().to(device, non_blocking=True)
-                ba = torch.from_numpy(data["b_allowed"][idx]).to(device, non_blocking=True)
-                logits = belief_net(sb, hb, npb, ba)
-                loss = F.cross_entropy(logits.view(-1, 3), bt.view(-1), ignore_index=-1)
-                b_opt.zero_grad(set_to_none=True)
-                loss.backward()
-                nn.utils.clip_grad_norm_(belief_net.parameters(), 2.0)
-                b_opt.step()
+            for p_lo, p_hi in ((0, 8), (8, 16), (16, 24), (24, 32)):
+                t_max = max(1, p_hi - 1)
+                sb_all = buf.states[p_lo:p_hi].reshape(-1, bc.STATE_DIM)
+                hb_all = buf.hists[p_lo:p_hi, :, :t_max, :].reshape(-1, t_max, bc.PLY_DIM)
+                npb_all = buf.n_plies[p_lo:p_hi].reshape(-1)
+                bt_all = buf.bt[p_lo:p_hi].reshape(-1, 32)
+                ba_all = buf.ba[p_lo:p_hi].reshape(-1, 32, 3)
+                perm = torch.randperm(len(sb_all), device=device)
+                for s in range(0, len(perm), args.batch_size):
+                    mb = perm[s : s + args.batch_size]
+                    with _autocast(device):
+                        logits = belief_net(sb_all[mb], hb_all[mb], npb_all[mb], ba_all[mb])
+                        loss = F.cross_entropy(logits.float().view(-1, 3), bt_all[mb].long().view(-1), ignore_index=-1)
+                    b_opt.zero_grad(set_to_none=True)
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(belief_net.parameters(), 2.0)
+                    b_opt.step()
 
         if episodes_done >= next_eval or rnd == total_rounds:
             elapsed = time.perf_counter() - t_start
@@ -372,13 +404,16 @@ def main() -> None:
                 msg += f" | B_phi CE={bev['model_loss']:.4f} (unif={bev['uniform_loss']:.4f})"
             print(msg, flush=True)
 
-            if ev_rule["units"] > best_score:
-                best_score = ev_rule["units"]
+            # Track best checkpoint by rollout:32 margin (tighter discrimination once above rule).
+            score = ev_roll["units"] + 0.5 * ev_rule["units"]
+            if score > best_score:
+                best_score = score
                 ckpt = {
                     "encoder_version": bc.ENCODER_VERSION,
                     "arch": args.arch,
                     "episodes": episodes_done,
-                    "best_vs_rule": best_score,
+                    "best_vs_rule": ev_rule["units"],
+                    "best_vs_rollout32": ev_roll["units"],
                     "q_state_dict": q_model.state_dict(),
                 }
                 if belief_net is not None:
@@ -411,7 +446,7 @@ def main() -> None:
             q_model,
             device=device,
             num_deals=args.distill_deals,
-            batch_envs=min(256, args.envs),
+            batch_envs=min(512, args.envs),
             save_bin=fast_bin,
         )
         ev_fast = eval_vs_cpp_agent(fast, "rule", decks=args.eval_decks, device=device)

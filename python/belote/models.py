@@ -68,17 +68,31 @@ class DuelingQHead(nn.Module):
     ) -> torch.Tensor:
         # trunk: (B, D), actions: (B, K, A), valid_mask: (B, K) bool
         v = self.v_head(trunk)  # (B, 1)
-        b, k, _ = actions.shape
-        ae = self.act_in(actions)
-        te = trunk.unsqueeze(1).expand(b, k, -1)
-        adv = self.adv_in(torch.cat([te, ae], dim=-1)).squeeze(-1)  # (B, K)
+        b, k_full, _ = actions.shape
         if valid_mask is not None:
-            vm = valid_mask.to(adv.dtype)
+            # Trim padded trailing action slots (e.g. tricks 4-7 only have 1-4 legal moves).
+            k_active = int(valid_mask.any(dim=0).nonzero(as_tuple=False).max().item()) + 1 if valid_mask.any() else 1
+            act_in_t = actions[:, :k_active, :]
+            vm = valid_mask[:, :k_active].to(v.dtype)
+        else:
+            k_active = k_full
+            act_in_t = actions
+            vm = None
+
+        ae = self.act_in(act_in_t)
+        te = trunk.unsqueeze(1).expand(b, k_active, -1)
+        adv = self.adv_in(torch.cat([te, ae], dim=-1)).squeeze(-1)  # (B, k_active)
+        if vm is not None:
             denom = vm.sum(dim=-1, keepdim=True).clamp(min=1.0)
             mean_adv = (adv * vm).sum(dim=-1, keepdim=True) / denom
         else:
             mean_adv = adv.mean(dim=-1, keepdim=True)
-        return v + (adv - mean_adv)
+        q_active = v + (adv - mean_adv)
+        if k_active == k_full:
+            return q_active
+        q_out = torch.zeros((b, k_full), dtype=q_active.dtype, device=q_active.device)
+        q_out[:, :k_active] = q_active
+        return q_out
 
 
 class CardQMLP(nn.Module):
