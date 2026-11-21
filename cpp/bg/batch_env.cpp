@@ -9,9 +9,11 @@
 
 namespace bg {
 
-BgBatchPlayEnv::BgBatchPlayEnv(int num_envs, std::uint64_t seed, double bid_noise, double hanging_prob, int threads)
+BgBatchPlayEnv::BgBatchPlayEnv(int num_envs, std::uint64_t seed, double bid_noise, double hanging_prob, int threads,
+                               ContractMode mode, bool allow_double)
     : num_envs_(num_envs), threads_(std::max(1, threads)), bid_noise_(bid_noise), hanging_prob_(hanging_prob),
-      rngs_(std::size_t(num_envs)), cached_legal_(std::size_t(num_envs)), cached_n_legal_(std::size_t(num_envs), 0) {
+      mode_(mode), allow_double_(allow_double), rngs_(std::size_t(num_envs)), cached_legal_(std::size_t(num_envs)),
+      cached_n_legal_(std::size_t(num_envs), 0) {
     if (num_envs <= 0) throw std::invalid_argument("BgBatchPlayEnv: num_envs must be > 0");
     resetAll(seed);
 }
@@ -21,7 +23,7 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
     std::array<int, kCards> deck;
     std::iota(deck.begin(), deck.end(), 0);
 
-    for (int attempt = 0; attempt < 200; ++attempt) {
+    for (int attempt = 0; attempt < 400; ++attempt) {
         std::shuffle(deck.begin(), deck.end(), rng);
         const int first = int(rng() % kPlayers);
         int hanging = 0;
@@ -30,11 +32,22 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
             hanging = kHangChoices[rng() % 5];
         }
         Round r(deck, first, hanging);
-        // Mix standard natural bidding (at_bonus=0) and aggressive-AT natural bidding
-        // (at_bonus=8, closer to Kostov's Master table) without unnatural random bids.
-        const int at_bonus = (rng() & 1u) ? 8 : 0;
+        // Pick natural bidding tuning appropriate for the requested specialist contract mode
+        // so acceptance is fast (~40-65%) while keeping every auction 100% natural.
+        int at_bonus = 0;
+        int nt_bonus = 0;
+        if (mode_ == ContractMode::kAll) {
+            at_bonus = (rng() & 1u) ? 8 : 0;
+        } else if (mode_ == ContractMode::kAllTrumps) {
+            at_bonus = 10;  // realistic aggressive AT tables (~60% AT, matching Master's 68% AT)
+        } else if (mode_ == ContractMode::kSuit) {
+            at_bonus = 0;
+        } else if (mode_ == ContractMode::kNoTrumps) {
+            at_bonus = -10;
+            nt_bonus = 6;
+        }
         while (r.decision() == Round::Decision::kBid) {
-            std::uint8_t bid = naturalBidTuned(r, at_bonus);
+            std::uint8_t bid = naturalBidTuned(r, at_bonus, nt_bonus, allow_double_);
             if (bid_noise_ > 0.0 && u(rng) < bid_noise_) {
                 const std::uint8_t avail = r.availableBids();
                 std::uint8_t opts[9];
@@ -42,6 +55,7 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
                 opts[n++] = kPass;
                 for (int b = 0; b < 8; ++b) {
                     const std::uint8_t f = std::uint8_t(1u << b);
+                    if (!allow_double_ && (f == kDouble || f == kReDouble)) continue;
                     if (avail & f) opts[n++] = f;
                 }
                 if (n > 1) bid = opts[rng() % std::uint64_t(n)];
@@ -49,12 +63,16 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
             r.bid(bid);
         }
         if (r.finished()) continue;
+        const std::uint8_t c = r.contract();
+        if (mode_ == ContractMode::kSuit && !(c & 15u)) continue;
+        if (mode_ == ContractMode::kNoTrumps && !(c & kNoTrumps)) continue;
+        if (mode_ == ContractMode::kAllTrumps && !(c & kAllTrumps)) continue;
         while (r.decision() == Round::Decision::kAnnounce) {
             r.declare(chooseDeclarations(r.offeredAnnounces()));
         }
         if (r.decision() == Round::Decision::kPlay) return r;
     }
-    throw std::runtime_error("BgBatchPlayEnv: failed to generate non-passed deal");
+    throw std::runtime_error("BgBatchPlayEnv: failed to generate matching deal");
 }
 
 void BgBatchPlayEnv::cacheLegal(int env) {

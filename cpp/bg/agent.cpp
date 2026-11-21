@@ -433,9 +433,17 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     std::mt19937_64 local(o.seed);
     std::mt19937_64& rng = o.seed ? local : threadRng();
 
-    const bool use_fast = o.fast_policy != nullptr && o.fast_policy->loaded();
-    const bool use_belief = o.belief_model != nullptr && o.belief_model->loaded();
-    const bool use_q = o.q_model != nullptr && o.q_model->loaded();
+    // Resolve contract-specific specialist models (Suit / NT / AT) with fallback to unified defaults.
+    const NeuralSuite& spec = (ps.contract & kAllTrumps)   ? o.at_models
+                              : (ps.contract & kNoTrumps) ? o.nt_models
+                                                          : o.suit_models;
+    const BgFastPolicyModel* fast_ptr = (spec.fast && spec.fast->loaded()) ? spec.fast : o.fast_policy;
+    const BgBeliefModel* belief_ptr = (spec.belief && spec.belief->loaded()) ? spec.belief : o.belief_model;
+    const BgQGRUModel* q_ptr = (spec.q && spec.q->loaded()) ? spec.q : o.q_model;
+
+    const bool use_fast = fast_ptr != nullptr && fast_ptr->loaded();
+    const bool use_belief = belief_ptr != nullptr && belief_ptr->loaded();
+    const bool use_q = q_ptr != nullptr && q_ptr->loaded();
 
     MatchContext match_ctx;
     if (o.match_equity && (ps.sn > 0 || ps.ew > 0 || ps.hanging > 0)) {
@@ -450,16 +458,16 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     const bool bid_weight = o.auction_weight > 0.0 && !ps.bids.empty();
     const bool weighted = rule_play_weight || fast_play_weight || bid_weight;
 
-    // Precompute Belief-DP per-card weights once at the root (~1.2 ms) if BgBeliefModel is loaded.
+    // Precompute Belief-DP per-card weights once at the root (~0.14 ms) if BgBeliefModel is loaded.
     std::array<std::array<double, 3>, kCards> belief_weights{};
     if (use_belief) {
-        belief_weights = o.belief_model->samplerWeights(ps, sampler, o.belief_temp);
+        belief_weights = belief_ptr->samplerWeights(ps, sampler, o.belief_temp);
     }
 
     auto logWeight = [&](const Hands& h) -> double {
         double lw = 0.0;
         if (rule_play_weight) lw += double(policyMismatches(ps, h)) * std::log(std::max(o.lik_eps, 1e-12));
-        if (fast_play_weight) lw += o.fast_lik_weight * fastPlayLogLik(ps, h, *o.fast_policy, o.fast_lik_temp);
+        if (fast_play_weight) lw += o.fast_lik_weight * fastPlayLogLik(ps, h, *fast_ptr, o.fast_lik_temp);
         if (bid_weight) lw += o.auction_weight * auctionLogLik(ps, h);
         return lw;
     };
@@ -583,7 +591,7 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
 
     // Prior card & optional root Q-GRU evaluation (once at root).
     std::vector<std::pair<int, double>> q_root;
-    if (use_q) q_root = o.q_model->evalLegal(ps, &sampler.facts());
+    if (use_q) q_root = q_ptr->evalLegal(ps, &sampler.facts());
 
     if (use_q && !q_root.empty()) {
         int best_q_card = q_root[0].first;
@@ -596,7 +604,7 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
         }
         res.rule_card = best_q_card;
     } else if (use_fast) {
-        res.rule_card = o.fast_policy->chooseCard(ps, &sampler.facts());
+        res.rule_card = fast_ptr->chooseCard(ps, &sampler.facts());
     } else {
         res.rule_card = rulePolicy(any);
     }
@@ -628,7 +636,7 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
                 for (std::size_t i = 0; i < nm; ++i) {
                     Round sim = bases[w];
                     sim.play(moves[i], true);
-                    val[i * nw + w] = playOut(std::move(sim), team, o.endgame_tricks, o.fast_policy, match_ctx);
+                    val[i * nw + w] = playOut(std::move(sim), team, o.endgame_tricks, fast_ptr, match_ctx);
                 }
             }
         }
@@ -643,7 +651,7 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
                 if (!alive[i]) continue;
                 Round sim = bases[w];
                 sim.play(moves[i], true);
-                val[i * nw + w] = playOut(std::move(sim), team, o.endgame_tricks, o.fast_policy, match_ctx);
+                val[i * nw + w] = playOut(std::move(sim), team, o.endgame_tricks, fast_ptr, match_ctx);
             }
             w_eval = w + 1;
             if (w_eval >= next_check && w_eval < nw && n_alive > 1) {

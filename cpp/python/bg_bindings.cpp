@@ -50,23 +50,41 @@ SearchOptions parseOppOpts(const std::string& spec, bool& is_policy) {
     return o;
 }
 
+ContractMode parseMode(const std::string& mode) {
+    if (mode == "all" || mode.empty()) return ContractMode::kAll;
+    if (mode == "suit") return ContractMode::kSuit;
+    if (mode == "nt") return ContractMode::kNoTrumps;
+    if (mode == "at") return ContractMode::kAllTrumps;
+    throw std::invalid_argument("unknown contract mode: " + mode);
+}
+
 // Mirrored evaluation batch: runs 2*N mirrored deals (our agent vs C++ opponent),
 // stepping opponent decisions in parallel across C++ threads and pausing whenever
 // any active game needs a card from our Python agent.
 class BgEvalSession {
 public:
-    BgEvalSession(int num_deals, std::uint64_t seed, const std::string& opp_spec, int threads)
+    BgEvalSession(int num_deals, std::uint64_t seed, const std::string& opp_spec, int threads,
+                  const std::string& mode_str = "all", bool allow_double = false)
         : threads_(std::max(1, threads)) {
         opp_opts_ = parseOppOpts(opp_spec, opp_is_policy_);
+        const ContractMode mode = parseMode(mode_str);
+        const int at_bonus = (mode == ContractMode::kAllTrumps) ? 10 : (mode == ContractMode::kNoTrumps ? -10 : 0);
+        const int nt_bonus = (mode == ContractMode::kNoTrumps) ? 6 : 0;
         std::array<int, kCards> deck;
         std::iota(deck.begin(), deck.end(), 0);
-        for (int i = 0; i < num_deals; ++i) {
+        int produced = 0;
+        for (int i = 0; produced < num_deals && i < num_deals * 10; ++i) {
             std::mt19937_64 rng(seed * 1000003ull + std::uint64_t(i));
             std::shuffle(deck.begin(), deck.end(), rng);
             const int first = i % kPlayers;
             Round probe(deck, first);
-            while (probe.decision() == Round::Decision::kBid) probe.bid(naturalBid(probe));
+            while (probe.decision() == Round::Decision::kBid)
+                probe.bid(naturalBidTuned(probe, at_bonus, nt_bonus, allow_double));
             if (probe.finished()) continue;
+            const std::uint8_t c = probe.contract();
+            if (mode == ContractMode::kSuit && !(c & 15u)) continue;
+            if (mode == ContractMode::kNoTrumps && !(c & kNoTrumps)) continue;
+            if (mode == ContractMode::kAllTrumps && !(c & kAllTrumps)) continue;
             while (probe.decision() == Round::Decision::kAnnounce)
                 probe.declare(chooseDeclarations(probe.offeredAnnounces()));
             if (probe.finished()) continue;
@@ -82,6 +100,7 @@ public:
                 g.rng.seed(game_seed);
                 games_.push_back(std::move(g));
             }
+            ++produced;
         }
         advanceOpponents();
     }
@@ -270,9 +289,14 @@ PYBIND11_MODULE(bg_cpp, m) {
     m.def("rel_seat", &relSeat);
 
     py::class_<BgBatchPlayEnv>(m, "BgBatchPlayEnv")
-        .def(py::init<int, std::uint64_t, double, double, int>(),
-             py::arg("num_envs"), py::arg("seed") = 1, py::arg("bid_noise") = 0.08,
-             py::arg("hanging_prob") = 0.06, py::arg("threads") = 8)
+        .def(py::init([](int num_envs, std::uint64_t seed, double bid_noise, double hanging_prob, int threads,
+                         const std::string& mode, bool allow_double) {
+                 return new BgBatchPlayEnv(num_envs, seed, bid_noise, hanging_prob, threads, parseMode(mode),
+                                           allow_double);
+             }),
+             py::arg("num_envs"), py::arg("seed") = 1, py::arg("bid_noise") = 0.0,
+             py::arg("hanging_prob") = 0.0, py::arg("threads") = 8, py::arg("mode") = "all",
+             py::arg("allow_double") = false)
         .def_property_readonly("num_envs", &BgBatchPlayEnv::numEnvs)
         .def("reset_all", &BgBatchPlayEnv::resetAll, py::arg("seed"))
         .def("observe_batch",
@@ -361,8 +385,9 @@ PYBIND11_MODULE(bg_cpp, m) {
              });
 
     py::class_<BgEvalSession>(m, "BgEvalSession")
-        .def(py::init<int, std::uint64_t, const std::string&, int>(),
-             py::arg("num_deals"), py::arg("seed") = 12345, py::arg("opp") = "policy", py::arg("threads") = 12)
+        .def(py::init<int, std::uint64_t, const std::string&, int, const std::string&, bool>(),
+             py::arg("num_deals"), py::arg("seed") = 12345, py::arg("opp") = "policy", py::arg("threads") = 12,
+             py::arg("mode") = "all", py::arg("allow_double") = false)
         .def_property_readonly("num_pairs", &BgEvalSession::numPairs)
         .def_property_readonly("num_active", &BgEvalSession::numActive)
         .def_property_readonly("done", &BgEvalSession::done)

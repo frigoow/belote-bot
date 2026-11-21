@@ -34,10 +34,14 @@ def eval_vs_cpp(
     seed: int = 12345,
     threads: int = 12,
     is_fast_policy: bool = False,
+    mode: str = "all",
+    allow_double: bool = False,
 ) -> dict[str, float]:
     """Evaluate a Python Q-GRU or FastPolicy in mirrored deals vs a C++ opponent."""
     model.eval()
-    sess = bgc.BgEvalSession(num_deals=num_deals, seed=seed, opp=opp_spec, threads=threads)
+    sess = bgc.BgEvalSession(
+        num_deals=num_deals, seed=seed, opp=opp_spec, threads=threads, mode=mode, allow_double=allow_double
+    )
     idx_range = torch.arange(bgc.MAX_LEGAL, device=device).unsqueeze(0)
 
     with _autocast(device):
@@ -74,11 +78,21 @@ def eval_belief_per_trick(
     num_deals: int = 512,
     seed: int = 54321,
     threads: int = 8,
+    mode: str = "all",
+    allow_double: bool = False,
 ) -> dict[str, dict[int, float]]:
     """Compare BgBeliefNet CE directly against exact DealSampler::exactMarginals() per trick."""
     q_model.eval()
     b_model.eval()
-    env = bgc.BgBatchPlayEnv(num_envs=num_deals, seed=seed, bid_noise=0.0, hanging_prob=0.06, threads=threads)
+    env = bgc.BgBatchPlayEnv(
+        num_envs=num_deals,
+        seed=seed,
+        bid_noise=0.0,
+        hanging_prob=0.0,
+        threads=threads,
+        mode=mode,
+        allow_double=allow_double,
+    )
     idx_range = torch.arange(bgc.MAX_LEGAL, device=device).unsqueeze(0)
 
     ce_model = {t: 0.0 for t in range(1, 9)}

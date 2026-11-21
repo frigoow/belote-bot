@@ -52,6 +52,12 @@ struct EndgameResult {
 EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx = {});
 int solveEndgameValue(const Round& r, int team, const MatchContext& match_ctx = {});
 
+struct NeuralSuite {
+    const BgFastPolicyModel* fast = nullptr;
+    const BgBeliefModel* belief = nullptr;
+    const BgQGRUModel* q = nullptr;
+};
+
 struct SearchOptions {
     int worlds = 48;
     int endgame_tricks = 3;      // exact for the last tricks of every play-out (0: never)
@@ -64,9 +70,13 @@ struct SearchOptions {
     double auction_weight = 1.0; // 0 disables the natural bidder likelihood
 
     // Manille v1.2.3 neural + Belief-DP + CRN racing + Match-Equity extensions:
+    // Default (unified) models plus optional per-contract specialist overrides (Suit / NT / AT).
     const BgFastPolicyModel* fast_policy = nullptr;
     const BgBeliefModel* belief_model = nullptr;
     const BgQGRUModel* q_model = nullptr;
+    NeuralSuite suit_models;
+    NeuralSuite nt_models;
+    NeuralSuite at_models;
     double belief_temp = 1.0;
     double fast_lik_weight = 0.0;
     double fast_lik_temp = 1.0;

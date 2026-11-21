@@ -19,10 +19,17 @@
 
 namespace bg {
 
+enum class ContractMode : int {
+    kAll = 0,
+    kSuit = 1,
+    kNoTrumps = 2,
+    kAllTrumps = 3,
+};
+
 class BgBatchPlayEnv {
 public:
-    BgBatchPlayEnv(int num_envs, std::uint64_t seed = 1, double bid_noise = 0.08, double hanging_prob = 0.06,
-                   int threads = 8);
+    BgBatchPlayEnv(int num_envs, std::uint64_t seed = 1, double bid_noise = 0.0, double hanging_prob = 0.0,
+                   int threads = 8, ContractMode mode = ContractMode::kAll, bool allow_double = false);
 
     int numEnvs() const { return num_envs_; }
 
@@ -57,8 +64,10 @@ private:
 
     int num_envs_ = 0;
     int threads_ = 1;
-    double bid_noise_ = 0.08;
-    double hanging_prob_ = 0.06;
+    double bid_noise_ = 0.0;
+    double hanging_prob_ = 0.0;
+    ContractMode mode_ = ContractMode::kAll;
+    bool allow_double_ = false;
     std::vector<std::mt19937_64> rngs_;
     std::vector<Round> deals_;
     std::vector<std::array<std::int32_t, kBgMaxLegal>> cached_legal_;

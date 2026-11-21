@@ -167,14 +167,24 @@ def distill_fast_policy(
     epochs: int = 8,
     temperature: float = 0.04,
     save_bin: Path | None = None,
+    mode: str = "all",
+    allow_double: bool = False,
 ) -> BgFastPolicy:
     """Distill compact 256x128 BgFastPolicy from converged BgCardQGRU."""
-    print(f"\n--- Distilling 256x128 BgFastPolicy over {num_deals:,} deals (T={temperature}) ---", flush=True)
+    print(f"\n--- Distilling 256x128 BgFastPolicy (mode={mode}) over {num_deals:,} deals (T={temperature}) ---", flush=True)
     q_model.eval()
     fast = BgFastPolicy().to(device)
     opt = torch.optim.AdamW(fast.parameters(), lr=1.5e-3, weight_decay=1e-4)
 
-    env = bgc.BgBatchPlayEnv(num_envs=batch_envs, seed=777, bid_noise=0.04, hanging_prob=0.06, threads=12)
+    env = bgc.BgBatchPlayEnv(
+        num_envs=batch_envs,
+        seed=777,
+        bid_noise=0.0,
+        hanging_prob=0.0,
+        threads=12,
+        mode=mode,
+        allow_double=allow_double,
+    )
     n_rounds = max(1, num_deals // batch_envs)
     idx_range = torch.arange(bgc.MAX_LEGAL, device=device).unsqueeze(0)
     empty_h = torch.zeros((batch_envs, 1, bgc.PLY_DIM), dtype=torch.float32, device=device)
@@ -264,11 +274,15 @@ def distill_fast_policy(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=("all", "suit", "nt", "at"), default="all")
+    ap.add_argument("--allow-double", action="store_true", help="Allow Double/Redouble during training (off for clean single-hand Manille mode)")
+    ap.add_argument("--hanging-prob", type=float, default=0.0)
     ap.add_argument("--episodes", type=int, default=5_000_000)
     ap.add_argument("--envs", type=int, default=1024)
     ap.add_argument("--env-threads", type=int, default=12)
     ap.add_argument("--batch-size", type=int, default=1024)
-    ap.add_argument("--epochs-per-round", type=int, default=2)
+    ap.add_argument("--replay-rounds", type=int, default=4, help="GPU BF16 rolling FIFO replay window in rounds (eliminates single-batch oscillation)")
+    ap.add_argument("--mb-per-round", type=int, default=32, help="Minibatch gradient steps per round sampled across the rolling replay window")
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--min-lr", type=float, default=3e-5)
     ap.add_argument("--eps-start", type=float, default=0.08)
@@ -278,9 +292,10 @@ def main() -> None:
     ap.add_argument("--train-belief", action="store_true")
     ap.add_argument("--belief-every", type=int, default=4)
     ap.add_argument("--distill-fast", action="store_true")
-    ap.add_argument("--distill-deals", type=int, default=60000)
+    ap.add_argument("--distill-only", action="store_true", help="Skip DMC training and distill BgFastPolicy from --resume")
+    ap.add_argument("--distill-deals", type=int, default=80000)
     ap.add_argument("--eval-every", type=int, default=250_000)
-    ap.add_argument("--eval-decks", type=int, default=400)
+    ap.add_argument("--eval-decks", type=int, default=800)
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--save", type=Path, default=Path("checkpoints/bg_q_gru.pt"))
     ap.add_argument("--export-dir", type=Path, default=Path("checkpoints/bg_models"))
@@ -360,13 +375,58 @@ def main() -> None:
             flush=True,
         )
 
+    if args.distill_only:
+        assert args.resume is not None and args.resume.exists(), "--distill-only requires an existing --resume checkpoint"
+        args.export_dir.mkdir(parents=True, exist_ok=True)
+        fast_policy = distill_fast_policy(
+            q_model,
+            device,
+            num_deals=args.distill_deals,
+            save_bin=args.export_dir / "bg_fast_policy.bin",
+            mode=args.mode,
+            allow_double=args.allow_double,
+        )
+        ev_fp = eval_vs_cpp(
+            fast_policy,
+            device,
+            opp_spec="policy",
+            num_deals=args.eval_decks,
+            seed=54321,
+            threads=args.env_threads,
+            is_fast_policy=True,
+            mode=args.mode,
+            allow_double=args.allow_double,
+        )
+        print(
+            f"  >>> Distilled BgFastPolicy (mode={args.mode}) vs rulePolicy (seed 54321): "
+            f"{ev_fp['mean']:+.3f} +- {ev_fp['ci']:.3f} game pts/deal ({ev_fp['pairs']} pairs)",
+            flush=True,
+        )
+        return
+
     need_belief_data = args.train_belief or args.aux_own_coef > 0.0
     env = bgc.BgBatchPlayEnv(
-        num_envs=args.envs, seed=args.seed, bid_noise=args.bid_noise, hanging_prob=0.06, threads=args.env_threads
+        num_envs=args.envs,
+        seed=args.seed,
+        bid_noise=args.bid_noise,
+        hanging_prob=args.hanging_prob,
+        threads=args.env_threads,
+        mode=args.mode,
+        allow_double=args.allow_double,
+    )
+    print(
+        f"Training mode={args.mode} allow_double={args.allow_double} hanging_prob={args.hanging_prob} "
+        f"replay_rounds={args.replay_rounds} mb_per_round={args.mb_per_round}",
+        flush=True,
     )
     buf = BgEpisodeBuffers(args.envs, device, include_beliefs=need_belief_data)
     rng = np.random.default_rng(args.seed + 999)
     idx_range = torch.arange(bgc.MAX_LEGAL, device=device).unsqueeze(0)
+
+    # GPU BF16 rolling FIFO replay ring of the last `replay_rounds` self-play rounds.
+    ring_cap = max(1, args.replay_rounds)
+    ring_q: list[tuple] = []
+    ring_ptr = 0
 
     args.save.parent.mkdir(parents=True, exist_ok=True)
     args.export_dir.mkdir(parents=True, exist_ok=True)
@@ -417,15 +477,35 @@ def main() -> None:
         if valid_idx.numel() == 0:
             continue
 
-        states_f = buf.states[:steps_run].reshape(-1, bgc.STATE_DIM)[valid_idx]
-        hists_f = buf.hists[:steps_run].reshape(-1, bgc.MAX_PLIES, bgc.PLY_DIM)[valid_idx]
-        nplies_f = buf.n_plies[:steps_run].reshape(-1)[valid_idx]
-        acts_f = buf.legal_actions[:steps_run].reshape(-1, bgc.MAX_LEGAL, bgc.ACTION_DIM)[valid_idx]
-        nl_f = buf.n_legal[:steps_run].reshape(-1)[valid_idx].long()
-        chosen_f = buf.chosen_idx[:steps_run].reshape(-1)[valid_idx].long()
-        ret_f = buf.returns[:steps_run].reshape(-1)[valid_idx]
-        bt_f = buf.bt[:steps_run].reshape(-1, 32)[valid_idx].long() if need_belief_data else None
-        bm_f = buf.bm[:steps_run].reshape(-1, 32, 3)[valid_idx] if train_belief_now else None
+        states_new = buf.states[:steps_run].reshape(-1, bgc.STATE_DIM)[valid_idx]
+        hists_new = buf.hists[:steps_run].reshape(-1, bgc.MAX_PLIES, bgc.PLY_DIM)[valid_idx]
+        nplies_new = buf.n_plies[:steps_run].reshape(-1)[valid_idx]
+        acts_new = buf.legal_actions[:steps_run].reshape(-1, bgc.MAX_LEGAL, bgc.ACTION_DIM)[valid_idx]
+        nl_new = buf.n_legal[:steps_run].reshape(-1)[valid_idx].long()
+        chosen_new = buf.chosen_idx[:steps_run].reshape(-1)[valid_idx].long()
+        ret_new = buf.returns[:steps_run].reshape(-1)[valid_idx]
+        bt_new = buf.bt[:steps_run].reshape(-1, 32)[valid_idx].long() if need_belief_data else None
+        bm_new = buf.bm[:steps_run].reshape(-1, 32, 3)[valid_idx] if train_belief_now else None
+
+        # Push this round into the rolling GPU FIFO replay window.
+        entry = (states_new, hists_new, nplies_new, acts_new, nl_new, chosen_new, ret_new, bt_new)
+        if len(ring_q) < ring_cap:
+            ring_q.append(entry)
+        else:
+            ring_q[ring_ptr] = entry
+        ring_ptr = (ring_ptr + 1) % ring_cap
+
+        if len(ring_q) == 1:
+            states_f, hists_f, nplies_f, acts_f, nl_f, chosen_f, ret_f, bt_f = ring_q[0]
+        else:
+            states_f = torch.cat([e[0] for e in ring_q], dim=0)
+            hists_f = torch.cat([e[1] for e in ring_q], dim=0)
+            nplies_f = torch.cat([e[2] for e in ring_q], dim=0)
+            acts_f = torch.cat([e[3] for e in ring_q], dim=0)
+            nl_f = torch.cat([e[4] for e in ring_q], dim=0)
+            chosen_f = torch.cat([e[5] for e in ring_q], dim=0)
+            ret_f = torch.cat([e[6] for e in ring_q], dim=0)
+            bt_f = torch.cat([e[7] for e in ring_q], dim=0) if need_belief_data else None
 
         q_model.train()
         if b_model is not None:
@@ -434,25 +514,24 @@ def main() -> None:
         q_loss_sum = own_loss_sum = b_loss_sum = 0.0
         n_mb = n_b_mb = 0
 
-        # 4 ply-length buckets: [0..7], [8..15], [16..23], [24..31], shuffled across buckets
-        # so AdamW updates are i.i.d. across tricks rather than always ending on trick 7!
+        # 4 ply-length buckets sampled across the rolling replay window, shuffled so updates
+        # are i.i.d. across tricks AND smooth across the last `replay_rounds` snapshots!
         buckets = (nplies_f // 8).clamp(0, 3)
-        for _ep in range(max(1, args.epochs_per_round)):
-            mb_schedule: list[tuple[int, torch.Tensor]] = []
-            for bkt in range(4):
-                b_indices = torch.nonzero(buckets == bkt, as_tuple=False).squeeze(-1)
-                nb = b_indices.numel()
-                if nb == 0:
-                    continue
-                perm = b_indices[torch.randperm(nb, device=device)]
-                h_len = max(1, int(nplies_f[b_indices].max().item()))
-                for start in range(0, nb, args.batch_size):
-                    mb_schedule.append((h_len, perm[start : start + args.batch_size]))
-
-            if not mb_schedule:
+        mb_schedule: list[tuple[int, torch.Tensor]] = []
+        for bkt in range(4):
+            b_indices = torch.nonzero(buckets == bkt, as_tuple=False).squeeze(-1)
+            nb = b_indices.numel()
+            if nb == 0:
                 continue
+            perm = b_indices[torch.randperm(nb, device=device)]
+            h_len = max(1, int(nplies_f[b_indices].max().item()))
+            for start in range(0, nb, args.batch_size):
+                mb_schedule.append((h_len, perm[start : start + args.batch_size]))
+
+        if mb_schedule:
             order = rng.permutation(len(mb_schedule))
-            for oi in order:
+            max_steps = min(len(order), max(1, args.mb_per_round))
+            for oi in order[:max_steps]:
                 h_len, mb_idx = mb_schedule[int(oi)]
                 s_mb = states_f[mb_idx]
                 h_mb = hists_f[mb_idx, :h_len, :]
@@ -485,21 +564,32 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(q_model.parameters(), 2.0)
                 q_opt.step()
                 q_loss_sum += float(q_mse.item())
-
-                if _ep == 0 and b_model is not None and b_opt is not None and bt_f is not None and bm_f is not None:
-                    bt_mb = bt_f[mb_idx]
-                    bm_mb = bm_f[mb_idx]
-                    with _autocast(device):
-                        b_logits = b_model(s_mb, h_mb, np_mb, bm_mb)
-                    b_ce = F.cross_entropy(b_logits.float().reshape(-1, 3), bt_mb.reshape(-1), ignore_index=-1)
-                    b_opt.zero_grad(set_to_none=True)
-                    b_ce.backward()
-                    torch.nn.utils.clip_grad_norm_(b_model.parameters(), 2.0)
-                    b_opt.step()
-                    b_loss_sum += float(b_ce.item())
-                    n_b_mb += 1
-
                 n_mb += 1
+
+        # Train residual BeliefNet B_phi on the fresh round's exact DealSampler marginals.
+        if train_belief_now and b_model is not None and b_opt is not None and bt_new is not None and bm_new is not None:
+            b_buckets = (nplies_new // 8).clamp(0, 3)
+            b_sched_list: list[tuple[int, torch.Tensor]] = []
+            for bkt in range(4):
+                b_indices = torch.nonzero(b_buckets == bkt, as_tuple=False).squeeze(-1)
+                nb = b_indices.numel()
+                if nb == 0:
+                    continue
+                perm = b_indices[torch.randperm(nb, device=device)]
+                h_len = max(1, int(nplies_new[b_indices].max().item()))
+                for start in range(0, nb, args.batch_size):
+                    b_sched_list.append((h_len, perm[start : start + args.batch_size]))
+            for oi in rng.permutation(len(b_sched_list)):
+                h_len, mb_idx = b_sched_list[int(oi)]
+                with _autocast(device):
+                    b_logits = b_model(states_new[mb_idx], hists_new[mb_idx, :h_len, :], nplies_new[mb_idx], bm_new[mb_idx])
+                b_ce = F.cross_entropy(b_logits.float().reshape(-1, 3), bt_new[mb_idx].reshape(-1), ignore_index=-1)
+                b_opt.zero_grad(set_to_none=True)
+                b_ce.backward()
+                torch.nn.utils.clip_grad_norm_(b_model.parameters(), 2.0)
+                b_opt.step()
+                b_loss_sum += float(b_ce.item())
+                n_b_mb += 1
 
         q_sched.step()
         if b_sched is not None and train_belief_now:
@@ -524,16 +614,30 @@ def main() -> None:
             next_eval += args.eval_every
             # Selection eval on fixed seed 12345 (held-out reporting uses seed 54321).
             ev = eval_vs_cpp(
-                q_model, device, opp_spec="policy", num_deals=args.eval_decks, seed=12345, threads=args.env_threads
+                q_model,
+                device,
+                opp_spec="policy",
+                num_deals=args.eval_decks,
+                seed=12345,
+                threads=args.env_threads,
+                mode=args.mode,
+                allow_double=args.allow_double,
             )
             print(
-                f"  >>> EVAL ({episodes_done:,}) Q-GRU vs rulePolicy: "
+                f"  >>> EVAL ({episodes_done:,}, mode={args.mode}) Q-GRU vs rulePolicy: "
                 f"{ev['mean']:+.3f} +- {ev['ci']:.3f} game pts/deal ({ev['pairs']} mirrored pairs)",
                 flush=True,
             )
             if b_model is not None:
                 br = eval_belief_per_trick(
-                    q_model, b_model, device, num_deals=256, seed=12345, threads=args.env_threads
+                    q_model,
+                    b_model,
+                    device,
+                    num_deals=256,
+                    seed=12345,
+                    threads=args.env_threads,
+                    mode=args.mode,
+                    allow_double=args.allow_double,
                 )
                 print(
                     f"  >>> BELIEF All={br['model'][0]:.4f} vs DealSampler={br['sampler'][0]:.4f} "
@@ -575,6 +679,8 @@ def main() -> None:
             device,
             num_deals=args.distill_deals,
             save_bin=args.export_dir / "bg_fast_policy.bin",
+            mode=args.mode,
+            allow_double=args.allow_double,
         )
         ev_fp = eval_vs_cpp(
             fast_policy,
@@ -584,6 +690,8 @@ def main() -> None:
             seed=12345,
             threads=args.env_threads,
             is_fast_policy=True,
+            mode=args.mode,
+            allow_double=args.allow_double,
         )
         print(
             f"  >>> FastPolicy vs rulePolicy: {ev_fp['mean']:+.3f} +- {ev_fp['ci']:.3f} game pts/deal",

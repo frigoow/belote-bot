@@ -33,6 +33,9 @@ int main(int argc, char** argv) {
     bool fast_only = false;
     std::uint64_t seed = 0;
     std::string fast_path, belief_path, qgru_path;
+    std::string fast_suit, belief_suit, qgru_suit;
+    std::string fast_nt, belief_nt, qgru_nt;
+    std::string fast_at, belief_at, qgru_at;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -46,8 +49,17 @@ int main(int argc, char** argv) {
         else if (a == "--margin") o.margin = std::stod(next());
         else if (a == "--fast") fast_path = next();
         else if (a == "--belief") belief_path = next();
-        else if (a == "--belief-temp") o.belief_temp = std::stod(next());
         else if (a == "--qgru") qgru_path = next();
+        else if (a == "--fast-suit") fast_suit = next();
+        else if (a == "--belief-suit") belief_suit = next();
+        else if (a == "--qgru-suit") qgru_suit = next();
+        else if (a == "--fast-nt") fast_nt = next();
+        else if (a == "--belief-nt") belief_nt = next();
+        else if (a == "--qgru-nt") qgru_nt = next();
+        else if (a == "--fast-at") fast_at = next();
+        else if (a == "--belief-at") belief_at = next();
+        else if (a == "--qgru-at") qgru_at = next();
+        else if (a == "--belief-temp") o.belief_temp = std::stod(next());
         else if (a == "--q-blend") o.q_blend = std::stod(next());
         else if (a == "--q-taper") o.q_taper_trick = std::stoi(next());
         else if (a == "--fast-lik") o.fast_lik_weight = std::stod(next());
@@ -62,29 +74,31 @@ int main(int argc, char** argv) {
         else if (a == "--fast-only") fast_only = true;
         else if (a == "--seed") seed = std::stoull(next());
     }
-    BgFastPolicyModel fast_model;
-    BgBeliefModel belief_model;
-    BgQGRUModel q_model;
-    if (!fast_path.empty()) {
-        if (!fast_model.load(fast_path)) {
-            std::cerr << "bg_agent: failed to load --fast " << fast_path << std::endl;
-            return 2;
+    BgFastPolicyModel fast_model, fast_m_suit, fast_m_nt, fast_m_at;
+    BgBeliefModel belief_model, belief_m_suit, belief_m_nt, belief_m_at;
+    BgQGRUModel q_model, q_m_suit, q_m_nt, q_m_at;
+    auto loadOne = [](auto& m, const std::string& p, const auto*& dst, const char* tag) -> bool {
+        if (p.empty()) return true;
+        if (!m.load(p)) {
+            std::cerr << "bg_agent: failed to load " << tag << " " << p << std::endl;
+            return false;
         }
-        o.fast_policy = &fast_model;
-    }
-    if (!belief_path.empty()) {
-        if (!belief_model.load(belief_path)) {
-            std::cerr << "bg_agent: failed to load --belief " << belief_path << std::endl;
-            return 2;
-        }
-        o.belief_model = &belief_model;
-    }
-    if (!qgru_path.empty()) {
-        if (!q_model.load(qgru_path)) {
-            std::cerr << "bg_agent: failed to load --qgru " << qgru_path << std::endl;
-            return 2;
-        }
-        o.q_model = &q_model;
+        dst = &m;
+        return true;
+    };
+    if (!loadOne(fast_model, fast_path, o.fast_policy, "--fast") ||
+        !loadOne(belief_model, belief_path, o.belief_model, "--belief") ||
+        !loadOne(q_model, qgru_path, o.q_model, "--qgru") ||
+        !loadOne(fast_m_suit, fast_suit, o.suit_models.fast, "--fast-suit") ||
+        !loadOne(belief_m_suit, belief_suit, o.suit_models.belief, "--belief-suit") ||
+        !loadOne(q_m_suit, qgru_suit, o.suit_models.q, "--qgru-suit") ||
+        !loadOne(fast_m_nt, fast_nt, o.nt_models.fast, "--fast-nt") ||
+        !loadOne(belief_m_nt, belief_nt, o.nt_models.belief, "--belief-nt") ||
+        !loadOne(q_m_nt, qgru_nt, o.nt_models.q, "--qgru-nt") ||
+        !loadOne(fast_m_at, fast_at, o.at_models.fast, "--fast-at") ||
+        !loadOne(belief_m_at, belief_at, o.at_models.belief, "--belief-at") ||
+        !loadOne(q_m_at, qgru_at, o.at_models.q, "--qgru-at")) {
+        return 2;
     }
     std::mt19937_64 rng(seed ? seed : std::random_device{}());
     std::ios::sync_with_stdio(false);
@@ -123,10 +137,20 @@ int main(int argc, char** argv) {
         in >> ps.sn >> ps.ew >> ps.hanging;
         int card = kNoCard;
         try {
-            if (qgru_only && q_model.loaded()) {
-                card = q_model.chooseCard(ps);
-            } else if (fast_only && fast_model.loaded()) {
-                card = fast_model.chooseCard(ps);
+            if (qgru_only) {
+                const NeuralSuite& sp = (ps.contract & kAllTrumps) ? o.at_models
+                                        : (ps.contract & kNoTrumps) ? o.nt_models
+                                                                    : o.suit_models;
+                const BgQGRUModel* qp = (sp.q && sp.q->loaded()) ? sp.q : o.q_model;
+                if (!qp || !qp->loaded()) throw std::runtime_error("no qgru model loaded");
+                card = qp->chooseCard(ps);
+            } else if (fast_only) {
+                const NeuralSuite& sp = (ps.contract & kAllTrumps) ? o.at_models
+                                        : (ps.contract & kNoTrumps) ? o.nt_models
+                                                                    : o.suit_models;
+                const BgFastPolicyModel* fp = (sp.fast && sp.fast->loaded()) ? sp.fast : o.fast_policy;
+                if (!fp || !fp->loaded()) throw std::runtime_error("no fast model loaded");
+                card = fp->chooseCard(ps);
             } else if (policy_only) {
                 DealSampler s(ps);
                 auto h = s.sample(rng);
