@@ -1,0 +1,6 @@
+build/
+build-*/
+cpp/build/
+cpp/build-*/
+*.o
+.vscode/
