@@ -4,10 +4,51 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 namespace bg {
 
 namespace {
+
+inline float dotProduct(const float* a, const float* b, int n) {
+    int i = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    for (; i + 16 <= n; i += 16) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8), acc1);
+    }
+    for (; i + 8 <= n; i += 8) {
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), acc0);
+    }
+    acc0 = _mm256_add_ps(acc0, acc1);
+    alignas(32) float tmp[8];
+    _mm256_store_ps(tmp, acc0);
+    float sum = (tmp[0] + tmp[1]) + (tmp[2] + tmp[3]) + (tmp[4] + tmp[5]) + (tmp[6] + tmp[7]);
+#else
+    float sum = 0.0f;
+#endif
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+}
+
+inline void axpy(float alpha, const float* x, float* y, int n) {
+    int i = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+    const __m256 va = _mm256_set1_ps(alpha);
+    for (; i + 16 <= n; i += 16) {
+        _mm256_storeu_ps(y + i, _mm256_fmadd_ps(va, _mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i)));
+        _mm256_storeu_ps(y + i + 8, _mm256_fmadd_ps(va, _mm256_loadu_ps(x + i + 8), _mm256_loadu_ps(y + i + 8)));
+    }
+    for (; i + 8 <= n; i += 8) {
+        _mm256_storeu_ps(y + i, _mm256_fmadd_ps(va, _mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i)));
+    }
+#endif
+    for (; i < n; ++i) y[i] += alpha * x[i];
+}
 
 bool readBytes(std::ifstream& in, void* dst, std::size_t n) {
     in.read(reinterpret_cast<char*>(dst), std::streamsize(n));
@@ -61,9 +102,7 @@ void applyLinear(const detail::Linear& l, const float* x, float* y) {
     const float* b = l.b.data();
     for (int o = 0; o < out_d; ++o) {
         const float* row = w + std::size_t(o) * std::size_t(in_d);
-        float acc = b[o];
-        for (int i = 0; i < in_d; ++i) acc += row[i] * x[i];
-        y[o] = acc;
+        y[o] = b[o] + dotProduct(row, x, in_d);
     }
 }
 
@@ -110,16 +149,10 @@ void applyGru(const detail::GruLayer& g, const float* history, int n_plies, floa
         const float* x = history + std::size_t(t * I);
         for (int o = 0; o < 3 * H; ++o) {
             const float* wir = g.w_ih.data() + std::size_t(o) * std::size_t(I);
-            float ai = g.b_ih[std::size_t(o)];
-            for (int i = 0; i < I; ++i) {
-                if (x[i] != 0.0f) ai += wir[i] * x[i];
-            }
-            gi[std::size_t(o)] = ai;
+            gi[std::size_t(o)] = g.b_ih[std::size_t(o)] + dotProduct(wir, x, I);
 
             const float* whr = g.w_hh.data() + std::size_t(o) * std::size_t(H);
-            float ah = g.b_hh[std::size_t(o)];
-            for (int i = 0; i < H; ++i) ah += whr[i] * h_out[i];
-            gh[std::size_t(o)] = ah;
+            gh[std::size_t(o)] = g.b_hh[std::size_t(o)] + dotProduct(whr, h_out, H);
         }
         for (int j = 0; j < H; ++j) {
             const float r = sigmoid(gi[std::size_t(j)] + gh[std::size_t(j)]);
@@ -196,23 +229,20 @@ void BgFastPolicyModel::forwardState(const float* state, float* logits_out) cons
         const float xi = state[i];
         if (xi == 0.0f) continue;
         const float* col = w1_t_.data() + std::size_t(i) * std::size_t(h1_);
-        for (int j = 0; j < h1_; ++j) z1[j] += xi * col[j];
+        axpy(xi, col, z1, h1_);
     }
     for (int j = 0; j < h1_; ++j)
         if (z1[j] < 0.0f) z1[j] = 0.0f;
 
     for (int o = 0; o < h2_; ++o) {
         const float* row = w2_.data() + std::size_t(o) * std::size_t(h1_);
-        float acc = b2_[std::size_t(o)];
-        for (int j = 0; j < h1_; ++j) acc += row[j] * z1[j];
+        const float acc = b2_[std::size_t(o)] + dotProduct(row, z1, h1_);
         z2[o] = acc > 0.0f ? acc : 0.0f;
     }
 
     for (int o = 0; o < out_dim_; ++o) {
         const float* row = w3_.data() + std::size_t(o) * std::size_t(h2_);
-        float acc = b3_[std::size_t(o)];
-        for (int j = 0; j < h2_; ++j) acc += row[j] * z2[j];
-        logits_out[o] = acc;
+        logits_out[o] = b3_[std::size_t(o)] + dotProduct(row, z2, h2_);
     }
 }
 
