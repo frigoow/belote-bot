@@ -8,10 +8,12 @@
 // below read only their own hand and public state.
 
 #include "belote/deal.h"
+#include "search/bid_model.h"
 #include "search/fast_policy.h"
 #include "search/ismcts.h"
 #include "search/rollout.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -19,12 +21,21 @@
 
 namespace belote {
 
+// Current match scoreboard passed to score-aware agents before each deal.
+struct MatchState {
+    std::array<int, 2> scores = {0, 0};
+    int pot = 0;
+    bool valid = false;
+};
+
 class Agent {
 public:
     virtual ~Agent() = default;
     virtual std::string name() const = 0;
     // Reset any internal RNG for reproducible evaluations (no-op for stateless agents).
     virtual void reseed(std::uint64_t) {}
+    // Optional match scoreboard context for score-aware bidding and play.
+    virtual void setMatchState(const MatchState&) {}
     // Phase kBid1/kBid2, the agent's turn.
     virtual Bid chooseBid(const Deal& d) = 0;
     // Before the agent's first card (only asked when the choice is open).
@@ -169,9 +180,66 @@ private:
     bool seeded_ = false;
 };
 
+// Score-aware neural bidder (DealOutcomeNet + BidNet + optional Stage 3 search)
+// combined with any card-play Agent.
+class BidWrapperAgent : public Agent {
+public:
+    BidWrapperAgent(std::shared_ptr<const BidModel> bid_model, std::unique_ptr<Agent> player,
+                    std::shared_ptr<const FastPolicyModel> search_policy, int search_worlds, double search_margin,
+                    std::string label, std::uint64_t seed = 0)
+        : bid_model_(std::move(bid_model)),
+          player_(std::move(player)),
+          search_policy_(std::move(search_policy)),
+          search_worlds_(search_worlds),
+          search_margin_(search_margin),
+          name_(std::move(label)),
+          rng_(seed),
+          seeded_(seed != 0) {}
+
+    std::string name() const override { return name_; }
+    void reseed(std::uint64_t seed) override {
+        rng_.seed(seed);
+        seeded_ = seed != 0;
+        player_->reseed(seed ^ 0xA5A5A5A55A5A5A5Aull);
+    }
+    void setMatchState(const MatchState& ms) override {
+        ms_ = ms;
+        player_->setMatchState(ms);
+    }
+    Bid chooseBid(const Deal& d) override {
+        const int t = teamOf(d.currentPlayer());
+        const int us = ms_.valid ? ms_.scores[t] : 0;
+        const int them = ms_.valid ? ms_.scores[1 - t] : 0;
+        const int pot = ms_.valid ? ms_.pot : 0;
+        if (search_worlds_ > 0 && search_policy_) {
+            std::uint64_t s = 0;
+            if (seeded_) {
+                s = rng_();
+                if (s == 0) s = 1;
+            }
+            return bid_model_->chooseBidSearch(d, *search_policy_, us, them, pot, search_worlds_, search_margin_, s);
+        }
+        return bid_model_->chooseBid(d, us, them, pot);
+    }
+    bool chooseDeclare(const Deal& d) override { return smartChooseDeclare(d); }
+    int chooseCard(const Deal& d) override { return player_->chooseCard(d); }
+
+private:
+    std::shared_ptr<const BidModel> bid_model_;
+    std::unique_ptr<Agent> player_;
+    std::shared_ptr<const FastPolicyModel> search_policy_;
+    int search_worlds_ = 0;
+    double search_margin_ = 0.04;
+    std::string name_;
+    MatchState ms_{};
+    std::mt19937_64 rng_;
+    bool seeded_ = false;
+};
+
 // "random", "rule", "ismcts:<iterations>[:<threads>]",
 // "rollout:<worlds>[:ab<trick>]", "fast:<weights.bin>",
-// "hybrid:<weights.bin>:<worlds>[:ab<trick>][:nowt]".
+// "hybrid:<weights.bin>:<worlds>[:ab<trick>][:race][:z<val>][:t<temp>][:nowt]",
+// "bid:<bundle.bin>[:s3=<worlds>[:m=<margin>][:<fast.bin>]][+<play_spec>]".
 std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed);
 
 }  // namespace belote

@@ -1,4 +1,4 @@
-"""Exact S_4 suit-equivariance and shape tests for M3 bidding models."""
+"""Exact S_4 suit-equivariance, residual anchoring, and C++ BBM1 parity tests for M3 bidding."""
 
 import itertools
 import random
@@ -10,10 +10,12 @@ import belote_cpp as bc
 from belote.bidding import (
     AUCTION_FEAT_DIM,
     MATCH_CTX_DIM,
+    NODE_K7_IDX,
     BidNet,
     DealOutcomeNet,
     encode_auction_take,
     encode_match_context,
+    export_bid_bundle,
 )
 from belote.match_equity import estimate_outcome_dist, solve_match_equity
 from belote.train_bidding import (
@@ -35,7 +37,7 @@ def _permute_mask(mask: int, perm: tuple[int, int, int, int]) -> int:
 
 def test_exact_s4_suit_equivariance_all_24_permutations():
     rng = random.Random(42)
-    model = DealOutcomeNet(num_buckets=64)
+    model = DealOutcomeNet(num_buckets=48)
     model.eval()
     perms = list(itertools.permutations(range(4)))
 
@@ -48,9 +50,10 @@ def test_exact_s4_suit_equivariance_all_24_permutations():
         blik = deck[5]
         blik_suit = blik >> 3
 
-        # Check both Round 1 (candidate_trump == blik_suit) and Round 2 (candidate_trump != blik_suit).
         for node_k, cand_trump in [(rng.randrange(0, 4), blik_suit), (rng.randrange(4, 8), (blik_suit + 1) % 4)]:
             base_feat = encode_auction_take(hand_5, blik, cand_trump, node_k)
+            cpp_feat = bc.encode_auction_take(hand_5, blik, cand_trump, node_k)
+            np.testing.assert_allclose(cpp_feat, base_feat, atol=1e-6)
             assert base_feat.shape == (AUCTION_FEAT_DIM,)
             with torch.no_grad():
                 base_probs = model.predict_probs(torch.from_numpy(base_feat).unsqueeze(0)).numpy()
@@ -66,39 +69,98 @@ def test_exact_s4_suit_equivariance_all_24_permutations():
                 np.testing.assert_array_equal(probs, base_probs)
 
 
-def test_bidnet_and_match_context():
+def test_bidnet_residual_anchor_and_node_k7():
     dist = estimate_outcome_dist(num_deals=500, seed=1)
     table = solve_match_equity(dist, target=101, margin=2, pot_cap=32)
-    ctx = encode_match_context(table, us=80, them=75, pot=8, we_deal=1, ev_take=0.62)
+    ctx = encode_match_context(table, us=80, them=75, pot=8, we_deal=1, ev_take=0.62, best_r2_ev=0.58)
     assert ctx.shape == (MATCH_CTX_DIM,)
     assert np.all(np.isfinite(ctx))
 
     bidnet = BidNet()
-    af = torch.zeros((4, AUCTION_FEAT_DIM))
-    mc = torch.from_numpy(ctx).unsqueeze(0).expand(4, -1)
+    # Zero-initialized residuals must exactly reproduce [v_redeal, ev_take].
+    af = torch.zeros((2, AUCTION_FEAT_DIM))
+    af[1, NODE_K7_IDX] = 1.0
+    mc = torch.from_numpy(ctx).unsqueeze(0).expand(2, -1)
     vals = bidnet(af, mc)
-    assert vals.shape == (4, 2)
-    assert torch.all((vals >= 0.0) & (vals <= 1.0))
+    assert vals.shape == (2, 2)
+    np.testing.assert_allclose(vals[0, 0].item(), ctx[4], atol=1e-5)
+    np.testing.assert_allclose(vals[0, 1].item(), ctx[5], atol=1e-5)
+
+    # Even with non-zero final weights, node_k == 7 must clamp V(Pass) to exact v_redeal.
+    with torch.no_grad():
+        bidnet.net[-1].bias.fill_(1.5)
+    vals2 = bidnet(af, mc)
+    np.testing.assert_allclose(vals2[1, 0].item(), ctx[4], atol=1e-6)
+    assert vals2[0, 0].item() > ctx[4] + 0.05
 
 
-def test_bidding_pipeline_smoke():
+def test_bidding_pipeline_and_cpp_bbm1_parity(tmp_path):
     cfg = bc.Config.belgian()
-    X, Y, buckets = collect_outcome_dataset(num_deals=60, config=cfg, seed=9)
-    assert len(X) > 30
+    X, Y, buckets = collect_outcome_dataset(num_deals=120, config=cfg, seed=9, threads=2, max_buckets=32, min_count=1)
+    assert len(X) > 60
     assert X.shape[1] == AUCTION_FEAT_DIM
     assert len(buckets) >= 5
 
-    dist = estimate_outcome_dist(num_deals=300, seed=2)
+    dist = estimate_outcome_dist(num_deals=400, seed=2)
     table = solve_match_equity(dist, target=101, margin=2, pot_cap=32)
+    torch.manual_seed(7)
     don = DealOutcomeNet(num_buckets=len(buckets))
     bidnet = BidNet()
+    # Non-zero residuals to test full C++ BidNet parity.
+    with torch.no_grad():
+        bidnet.net[-1].weight.normal_(0.0, 0.05)
+        bidnet.net[-1].bias.copy_(torch.tensor([0.12, -0.08]))
     don.eval()
     bidnet.eval()
 
-    probs = np.full(len(buckets), 1.0 / len(buckets), dtype=np.float64)
-    ev = expected_v_from_buckets(probs, buckets, table, 50, 50, 0, 0)
-    assert 0.0 <= ev <= 1.0
+    bundle = tmp_path / "bid.bin"
+    export_bid_bundle(bundle, don, bidnet, buckets, table)
+    cpp_bm = bc.BidModel.load(str(bundle))
 
-    deal = bc.Deal(cfg, 0, list(range(32)))
-    bid = choose_bid_with_bidnet(deal, 0, don, bidnet, buckets, table, 50, 50, 0, 1, torch.device("cpu"))
-    assert bid in deal.legal_bids()
+    # Verify exact V lookup parity including overtime margin=2.
+    for us, them, pot, wd in [(0, 0, 0, 0), (88, 72, 8, 1), (101, 101, 0, 0), (101, 100, 16, 1), (102, 100, 0, 0)]:
+        np.testing.assert_allclose(cpp_bm.lookup_v(us, them, pot, wd), table.lookup(us, them, pot, wd), atol=1e-6)
+
+    # Verify C++ BidModel matches Python choose_bid_with_bidnet & expected_v_from_buckets across R1 and R2.
+    rng = random.Random(123)
+    for trial in range(12):
+        deck = list(range(32))
+        rng.shuffle(deck)
+        deal = bc.Deal(cfg, trial % 4, deck)
+        for nk in range(8):
+            if deal.phase not in (bc.Phase.BID1, bc.Phase.BID2):
+                break
+            us, them, pot = 60 + trial * 3, 55 + trial * 2, (trial % 3) * 8
+            me = deal.current_player
+            wd = 1 if (deal.dealer & 1) == (me & 1) else 0
+            cands = [b for b in deal.legal_bids() if b.kind != bc.Bid.Kind.PASS]
+            bs = deal.blik >> 3
+            v_redeal = table.lookup(us, them, pot, 1 - wd)
+            r2_ev = v_redeal
+            if nk < 4:
+                r2_f = np.stack([encode_auction_take(deal.hand(me), deal.blik, s, nk + 4) for s in range(4) if s != bs])
+                r2_p = don.predict_probs(torch.from_numpy(r2_f)).numpy()
+                r2_ev = max(expected_v_from_buckets(r2_p[j], buckets, table, us, them, pot, wd) for j in range(len(r2_p)))
+            fs = np.stack(
+                [encode_auction_take(deal.hand(me), deal.blik, bs if b.kind == bc.Bid.Kind.TAKE else b.suit, nk) for b in cands]
+            )
+            ps = don.predict_probs(torch.from_numpy(fs)).numpy()
+            evs = [expected_v_from_buckets(ps[j], buckets, table, us, them, pot, wd) for j in range(len(cands))]
+            cs = np.stack([encode_match_context(table, us, them, pot, wd, evs[j], r2_ev) for j in range(len(cands))])
+            with torch.no_grad():
+                preds = bidnet(torch.from_numpy(fs), torch.from_numpy(cs)).numpy()
+            best_i = int(np.argmax(preds[:, 1]))
+            cpp_ev = cpp_bm.eval_bid(deal, us, them, pot)
+            np.testing.assert_allclose(cpp_ev.v_pass, float(preds[best_i, 0]), atol=1e-5)
+            np.testing.assert_allclose(cpp_ev.v_take, float(preds[best_i, 1]), atol=1e-5)
+            np.testing.assert_allclose(cpp_ev.ev_take, float(evs[best_i]), atol=1e-5)
+            assert cpp_ev.best_bid in deal.legal_bids()
+            # Exact bid choice match whenever there isn't a <1e-5 symmetric-suit tie.
+            sorted_vt = np.sort(preds[:, 1])
+            has_tie = len(sorted_vt) > 1 and (sorted_vt[-1] - sorted_vt[-2] < 1e-5)
+            if not has_tie and abs(float(preds[best_i, 1] - preds[best_i, 0])) > 1e-5:
+                py_bid = choose_bid_with_bidnet(deal, nk, don, bidnet, buckets, table, us, them, pot, wd, torch.device("cpu"))
+                assert cpp_ev.best_bid == py_bid
+            lp = cpp_bm.bid_log_prob(deal.hand(me), deal.blik, nk, cfg, cpp_ev.best_bid, us, them, pot, wd)
+            assert np.isfinite(lp) and lp <= 1e-9
+            deal.bid(bc.Bid.pass_())

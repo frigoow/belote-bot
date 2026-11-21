@@ -16,6 +16,7 @@
 #include "belote/rules.h"
 #include "belote/sampler.h"
 #include "belote/toon.h"
+#include "search/bid_model.h"
 #include "search/endgame.h"
 #include "search/fast_policy.h"
 #include "search/ismcts.h"
@@ -25,7 +26,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
+#include <atomic>
+#include <numeric>
 #include <random>
+#include <thread>
 
 namespace py = pybind11;
 using namespace belote;
@@ -499,6 +504,201 @@ PYBIND11_MODULE(belote_cpp, m) {
         .def_readonly("move_values", &HybridResult::move_values);
     m.def("hybrid_search", &hybridSearch, py::arg("deal"), py::arg("policy"),
           py::arg("options") = HybridOptions{}, py::call_guard<py::gil_scoped_release>());
+
+    // ------------------------------------------------------------ M3 bidding & fast C++ batch helpers
+    m.attr("AUCTION_FEAT_DIM") = kAuctionFeatDim;
+    m.attr("MATCH_CTX_DIM") = kMatchCtxDim;
+    m.def(
+        "encode_auction_take",
+        [](Mask hand_5, int blik, int candidate_trump, int node_k) {
+            py::array_t<float> arr(kAuctionFeatDim);
+            encodeAuctionTake(hand_5, blik, candidate_trump, node_k, arr.mutable_data());
+            return arr;
+        },
+        py::arg("hand_5"), py::arg("blik"), py::arg("candidate_trump"), py::arg("node_k"));
+
+    py::class_<BidEval>(m, "BidEval")
+        .def_readonly("best_bid", &BidEval::best_bid)
+        .def_readonly("best_take", &BidEval::best_take)
+        .def_readonly("v_pass", &BidEval::v_pass)
+        .def_readonly("v_take", &BidEval::v_take)
+        .def_readonly("ev_take", &BidEval::ev_take)
+        .def_readonly("v_redeal", &BidEval::v_redeal)
+        .def_readonly("best_r2_ev", &BidEval::best_r2_ev);
+
+    py::class_<BidModel>(m, "BidModel")
+        .def_static("load", &BidModel::load, py::arg("path"))
+        .def_property_readonly("target", &BidModel::target)
+        .def_property_readonly("margin", &BidModel::margin)
+        .def_property_readonly("pot_cap", &BidModel::potCap)
+        .def_property_readonly("num_buckets", &BidModel::numBuckets)
+        .def("lookup_v", &BidModel::lookupV, py::arg("us"), py::arg("them"), py::arg("pot"), py::arg("we_deal"))
+        .def("expected_v_take", &BidModel::expectedVTake, py::arg("hand_5"), py::arg("blik"),
+             py::arg("candidate_trump"), py::arg("node_k"), py::arg("us"), py::arg("them"), py::arg("pot"),
+             py::arg("we_deal"))
+        .def("eval_bid", &BidModel::evalBid, py::arg("deal"), py::arg("us") = 0, py::arg("them") = 0,
+             py::arg("pot") = 0)
+        .def("choose_bid", &BidModel::chooseBid, py::arg("deal"), py::arg("us") = 0, py::arg("them") = 0,
+             py::arg("pot") = 0)
+        .def("choose_bid_search", &BidModel::chooseBidSearch, py::arg("deal"), py::arg("play_policy"),
+             py::arg("us") = 0, py::arg("them") = 0, py::arg("pot") = 0, py::arg("worlds") = 200,
+             py::arg("search_margin") = 0.04, py::arg("seed") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("bid_log_prob", &BidModel::bidLogProb, py::arg("hand_5"), py::arg("blik"), py::arg("node_k"),
+             py::arg("config"), py::arg("chosen"), py::arg("us") = 0, py::arg("them") = 0, py::arg("pot") = 0,
+             py::arg("we_deal") = 0, py::arg("temperature") = 0.03);
+
+    // Multithreaded C++ auction outcome collector for DealOutcomeNet training.
+    m.def(
+        "collect_auction_outcomes",
+        [](int num_deals, const Config& cfg, std::shared_ptr<const FastPolicyModel> fast_policy, std::uint64_t seed,
+           int threads, double explore_prob) {
+            struct Sample {
+                float feat[kAuctionFeatDim];
+                int du_taker;
+                int dt_def;
+                int held;
+                int taker_won;
+            };
+            const int n_threads = std::max(1, threads);
+            std::vector<std::vector<Sample>> local(static_cast<std::size_t>(n_threads));
+            std::atomic<int> next{0};
+            auto worker = [&](int t) {
+                auto& dst = local[static_cast<std::size_t>(t)];
+                dst.reserve(static_cast<std::size_t>(num_deals / n_threads + 64));
+                std::mt19937_64 rng(seed * 0x9E3779B97F4A7C15ull + std::uint64_t(t + 1) * 7919ull);
+                std::uniform_real_distribution<double> u01(0.0, 1.0);
+                std::uniform_real_distribution<double> uthr(3.4, 6.2);
+                std::array<int, kCards> deck;
+                std::iota(deck.begin(), deck.end(), 0);
+                for (int i; (i = next.fetch_add(1)) < num_deals;) {
+                    std::shuffle(deck.begin(), deck.end(), rng);
+                    Deal d(cfg, i % kPlayers, deck);
+                    int node_k = 0;
+                    Sample samp{};
+                    bool took = false;
+                    while (d.phase() == Phase::kBid1 || d.phase() == Phase::kBid2) {
+                        const int me = d.currentPlayer();
+                        const Mask hand_5 = d.hand(me);
+                        const int blik = d.blik();
+                        const auto legal = d.legalBids();
+                        Bid chosen;
+                        if (u01(rng) < explore_prob) {
+                            const std::size_t k = 1 + (rng() % (legal.size() - 1));
+                            chosen = legal[k];
+                        } else {
+                            chosen = ruleBid(d, uthr(rng));
+                        }
+                        if (chosen.kind != Bid::kPass) {
+                            const int cand_trump = (chosen.kind == Bid::kTake) ? suitOf(blik) : chosen.suit;
+                            encodeAuctionTake(hand_5, blik, cand_trump, node_k, samp.feat);
+                            d.bid(chosen);
+                            took = true;
+                            break;
+                        }
+                        d.bid(chosen);
+                        ++node_k;
+                    }
+                    if (!took || d.phase() != Phase::kPlay) continue;
+                    while (d.phase() == Phase::kPlay) {
+                        const int p = d.currentPlayer();
+                        if (d.canSetDeclare(p)) d.setDeclare(p, smartChooseDeclare(d));
+                        const int c = fast_policy ? fast_policy->chooseCard(d) : ruleChooseCard(d);
+                        d.play(c);
+                    }
+                    const DealResult& res = d.result();
+                    const RecordedDeal rec = recordDeal(res, cfg);
+                    samp.du_taker = rec.scores[res.takers];
+                    samp.dt_def = rec.scores[1 - res.takers];
+                    samp.held = (res.outcome == Outcome::kHanging) ? rec.held : 0;
+                    samp.taker_won = (samp.held == 0 && res.outcome == Outcome::kMade) ? 1 : 0;
+                    dst.push_back(samp);
+                }
+            };
+            {
+                py::gil_scoped_release rel;
+                std::vector<std::thread> pool;
+                for (int t = 0; t < n_threads; ++t) pool.emplace_back(worker, t);
+                for (auto& th : pool) th.join();
+            }
+            std::size_t total = 0;
+            for (const auto& v : local) total += v.size();
+            py::array_t<float> feats(std::vector<py::ssize_t>{py::ssize_t(total), kAuctionFeatDim});
+            py::array_t<int> outcomes(std::vector<py::ssize_t>{py::ssize_t(total), 4});
+            float* fp = feats.mutable_data();
+            int* op = outcomes.mutable_data();
+            std::size_t row = 0;
+            for (const auto& v : local) {
+                for (const Sample& s : v) {
+                    std::memcpy(fp + row * kAuctionFeatDim, s.feat, kAuctionFeatDim * sizeof(float));
+                    op[row * 4 + 0] = s.du_taker;
+                    op[row * 4 + 1] = s.dt_def;
+                    op[row * 4 + 2] = s.held;
+                    op[row * 4 + 3] = s.taker_won;
+                    ++row;
+                }
+            }
+            py::dict out;
+            out["features"] = feats;
+            out["outcomes"] = outcomes;
+            return out;
+        },
+        py::arg("num_deals"), py::arg("config") = Config::belgian(), py::arg("fast_policy") = nullptr,
+        py::arg("seed") = 1, py::arg("threads") = 8, py::arg("explore_prob") = 0.18);
+
+    // Multithreaded C++ batch play-out of already-bid Deals (kPlay -> kDone).
+    m.def(
+        "play_out_deals_batch",
+        [](const std::vector<Deal*>& deals, std::shared_ptr<const FastPolicyModel> fast_policy, int threads) {
+            const std::size_t n = deals.size();
+            py::array_t<int> scores(std::vector<py::ssize_t>{static_cast<py::ssize_t>(n), 2});
+            py::array_t<int> held(static_cast<py::ssize_t>(n));
+            py::array_t<int> outcome(static_cast<py::ssize_t>(n));
+            py::array_t<int> takers(static_cast<py::ssize_t>(n));
+            int* sp = scores.mutable_data();
+            int* hp = held.mutable_data();
+            int* op = outcome.mutable_data();
+            int* tp = takers.mutable_data();
+            const int n_threads = std::max(1, std::min(threads, int(n)));
+            std::atomic<std::size_t> next{0};
+            auto worker = [&]() {
+                for (std::size_t i; (i = next.fetch_add(1)) < n;) {
+                    Deal& d = *deals[i];
+                    while (d.phase() == Phase::kPlay) {
+                        const int p = d.currentPlayer();
+                        if (d.canSetDeclare(p)) d.setDeclare(p, smartChooseDeclare(d));
+                        d.play(fast_policy ? fast_policy->chooseCard(d) : ruleChooseCard(d));
+                    }
+                    const DealResult& res = d.result();
+                    if (res.outcome == Outcome::kAllPassed || res.outcome == Outcome::kNone) {
+                        sp[i * 2 + 0] = 0;
+                        sp[i * 2 + 1] = 0;
+                        hp[i] = 0;
+                        op[i] = int(res.outcome);
+                        tp[i] = -1;
+                    } else {
+                        const RecordedDeal rec = recordDeal(res, d.config());
+                        sp[i * 2 + 0] = rec.scores[0];
+                        sp[i * 2 + 1] = rec.scores[1];
+                        hp[i] = (res.outcome == Outcome::kHanging) ? rec.held : 0;
+                        op[i] = int(res.outcome);
+                        tp[i] = res.takers;
+                    }
+                }
+            };
+            {
+                py::gil_scoped_release rel;
+                std::vector<std::thread> pool;
+                for (int t = 0; t < n_threads; ++t) pool.emplace_back(worker);
+                for (auto& th : pool) th.join();
+            }
+            py::dict out;
+            out["scores"] = scores;
+            out["held"] = held;
+            out["outcome"] = outcome;
+            out["takers"] = takers;
+            return out;
+        },
+        py::arg("deals"), py::arg("fast_policy") = nullptr, py::arg("threads") = 8);
 
     // ------------------------------------------------------------ agents / harness
     py::class_<Agent>(m, "Agent")

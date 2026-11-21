@@ -281,6 +281,12 @@ MatchDuelResult runMatchDuel(const MatchDuelOptions& o) {
                     const std::uint64_t dseed =
                         pair_seed + std::uint64_t(decided_idx) * 1009ull + std::uint64_t(redeal_attempt);
                     const auto deck = shuffledDeck(dseed);
+                    const MatchState ms{m.scores(), m.pot(), true};
+                    a->setMatchState(ms);
+                    b->setMatchState(ms);
+                    if (fixed_bidder) fixed_bidder->setMatchState(ms);
+                    if (fixed_player) fixed_player->setMatchState(ms);
+                    if (partner) partner->setMatchState(ms);
                     const Run run = playDeal(o.config, deck, m.dealer(), a_team, seats, fixed_bidder.get(),
                                              fixed_player.get());
                     for (int s = 0; s < 2; ++s) {

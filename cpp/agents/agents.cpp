@@ -1,4 +1,5 @@
 #include "agents/agent.h"
+#include "agents/rule_agent.h"
 
 #include <mutex>
 #include <stdexcept>
@@ -205,6 +206,7 @@ int ruleChooseCard(const Deal& d) {
 // ---------------------------------------------------------------- factory
 
 std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
+    if (auto rule_agent = makeRuleAgent(spec, seed)) return rule_agent;
     if (spec == "random") return std::make_unique<RandomAgent>(seed);
     if (spec == "rule") return std::make_unique<RuleAgent>();
     if (spec.rfind("ismcts:", 0) == 0) {
@@ -237,6 +239,54 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
         cache.emplace(path, m);
         return m;
     };
+    auto loadBidCached = [](const std::string& path) -> std::shared_ptr<const BidModel> {
+        static std::mutex mu;
+        static std::unordered_map<std::string, std::shared_ptr<const BidModel>> cache;
+        std::lock_guard<std::mutex> lock(mu);
+        auto it = cache.find(path);
+        if (it != cache.end()) return it->second;
+        auto m = std::make_shared<const BidModel>(BidModel::load(path));
+        cache.emplace(path, m);
+        return m;
+    };
+    if (spec.rfind("bid:", 0) == 0) {
+        // bid:<bundle.bin>[:s3=<worlds>[:m=<margin>][:<fast.bin>]][+<play_spec>]
+        const auto plus = spec.find('+');
+        const std::string bid_part = (plus == std::string::npos) ? spec.substr(4) : spec.substr(4, plus - 4);
+        const std::string play_spec = (plus == std::string::npos) ? "rule" : spec.substr(plus + 1);
+        std::vector<std::string> parts;
+        std::size_t start = 0;
+        while (start <= bid_part.size()) {
+            const auto pos = bid_part.find(':', start);
+            if (pos == std::string::npos) {
+                parts.push_back(bid_part.substr(start));
+                break;
+            }
+            parts.push_back(bid_part.substr(start, pos - start));
+            start = pos + 1;
+        }
+        if (parts.empty() || parts[0].empty()) throw std::invalid_argument("bid spec needs bid:<bundle.bin>");
+        int s3_worlds = 0;
+        double s3_margin = 0.04;
+        std::string fast_path;
+        for (std::size_t i = 1; i < parts.size(); ++i) {
+            if (parts[i].rfind("s3=", 0) == 0) s3_worlds = std::stoi(parts[i].substr(3));
+            else if (parts[i].rfind("m=", 0) == 0) s3_margin = std::stod(parts[i].substr(2));
+            else fast_path = parts[i];
+        }
+        // If s3 is requested without an explicit fast_path, infer from fast:/hybrid: play_spec.
+        if (s3_worlds > 0 && fast_path.empty()) {
+            if (play_spec.rfind("fast:", 0) == 0) {
+                fast_path = play_spec.substr(5);
+            } else if (play_spec.rfind("hybrid:", 0) == 0) {
+                const auto c2 = play_spec.find(':', 7);
+                fast_path = play_spec.substr(7, c2 == std::string::npos ? std::string::npos : c2 - 7);
+            }
+        }
+        std::shared_ptr<const FastPolicyModel> sp = fast_path.empty() ? nullptr : loadCached(fast_path);
+        return std::make_unique<BidWrapperAgent>(loadBidCached(parts[0]), makeAgent(play_spec, seed), std::move(sp),
+                                                 s3_worlds, s3_margin, spec, seed);
+    }
     if (spec.rfind("fast:", 0) == 0) {
         const std::string path = spec.substr(5);
         return std::make_unique<FastPolicyAgent>(loadCached(path), spec);
