@@ -520,12 +520,25 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
         lws.reserve(std::size_t(n_draw));
         for (int i = 0; i < n_draw; ++i) {
             auto h = use_belief ? sampler.sampleWeighted(rng, belief_weights) : sampler.sample(rng);
+            if (!h && use_belief) h = sampler.sample(rng);
             if (!h) break;
             auto r = sampler.replay(*h);
             if (!r) continue;
             drawn.push_back(*h);
             pool_bases.push_back(std::move(*r));
             lws.push_back(weighted ? logWeight(*h) : 0.0);
+        }
+        if (pool_bases.empty()) {
+            // Ultra-rare fallback (e.g. 3 overlapping opponent declarations): try uniform sampler with high tries.
+            for (int i = 0; i < std::max(8, o.worlds / 4); ++i) {
+                auto h = sampler.sample(rng, 1000);
+                if (!h) break;
+                auto r = sampler.replay(*h);
+                if (!r) continue;
+                drawn.push_back(*h);
+                pool_bases.push_back(std::move(*r));
+                lws.push_back(0.0);
+            }
         }
         if (pool_bases.empty()) throw std::runtime_error("searchCard: no consistent world");
 

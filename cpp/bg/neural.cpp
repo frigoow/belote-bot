@@ -269,7 +269,29 @@ int BgFastPolicyModel::chooseCard(const PublicState& ps, const Facts* facts) con
 int BgFastPolicyModel::chooseCard(const Round& r) const {
     const Mask legal = r.legalMoves();
     if (!(legal & (legal - 1))) return lowestCard(legal);
-    return chooseCard(publicState(r, r.toMove()));
+    thread_local PublicState ps = [] {
+        PublicState s;
+        s.bids.reserve(16);
+        s.declared.reserve(8);
+        s.plays.reserve(kCards);
+        return s;
+    }();
+    const int observer = r.toMove();
+    ps.first = r.first();
+    ps.me = observer;
+    ps.hand = r.hand(observer);
+    ps.contract = r.contract();
+    ps.declarer = r.contractPlayer();
+    ps.bids = r.bids();
+    ps.declared.clear();
+    for (const Announce& a : r.announces())
+        if (a.type != kBelot) ps.declared.push_back({a.player, a.type, a.player == observer ? a.card : kNoCard});
+    ps.plays.clear();
+    for (const auto& pl : r.plays()) ps.plays.push_back({pl.first, pl.second.first, pl.second.second});
+    ps.sn = 0;
+    ps.ew = 0;
+    ps.hanging = r.hangingBefore();
+    return chooseCard(ps);
 }
 
 double BgFastPolicyModel::legalLogProb(const PublicState& ps, int card, double temp, const Facts* facts) const {
