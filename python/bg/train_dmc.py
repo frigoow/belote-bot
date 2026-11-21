@@ -265,9 +265,10 @@ def distill_fast_policy(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--episodes", type=int, default=5_000_000)
-    ap.add_argument("--envs", type=int, default=2048)
+    ap.add_argument("--envs", type=int, default=1024)
     ap.add_argument("--env-threads", type=int, default=12)
     ap.add_argument("--batch-size", type=int, default=1024)
+    ap.add_argument("--epochs-per-round", type=int, default=2)
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--min-lr", type=float, default=3e-5)
     ap.add_argument("--eps-start", type=float, default=0.08)
@@ -431,23 +432,25 @@ def main() -> None:
             b_model.train()
 
         q_loss_sum = own_loss_sum = b_loss_sum = 0.0
-        n_mb = 0
+        n_mb = n_b_mb = 0
 
         # 4 ply-length buckets: [0..7], [8..15], [16..23], [24..31], shuffled across buckets
         # so AdamW updates are i.i.d. across tricks rather than always ending on trick 7!
         buckets = (nplies_f // 8).clamp(0, 3)
-        mb_schedule: list[tuple[int, torch.Tensor]] = []
-        for bkt in range(4):
-            b_indices = torch.nonzero(buckets == bkt, as_tuple=False).squeeze(-1)
-            nb = b_indices.numel()
-            if nb == 0:
-                continue
-            perm = b_indices[torch.randperm(nb, device=device)]
-            h_len = max(1, int(nplies_f[b_indices].max().item()))
-            for start in range(0, nb, args.batch_size):
-                mb_schedule.append((h_len, perm[start : start + args.batch_size]))
+        for _ep in range(max(1, args.epochs_per_round)):
+            mb_schedule: list[tuple[int, torch.Tensor]] = []
+            for bkt in range(4):
+                b_indices = torch.nonzero(buckets == bkt, as_tuple=False).squeeze(-1)
+                nb = b_indices.numel()
+                if nb == 0:
+                    continue
+                perm = b_indices[torch.randperm(nb, device=device)]
+                h_len = max(1, int(nplies_f[b_indices].max().item()))
+                for start in range(0, nb, args.batch_size):
+                    mb_schedule.append((h_len, perm[start : start + args.batch_size]))
 
-        if mb_schedule:
+            if not mb_schedule:
+                continue
             order = rng.permutation(len(mb_schedule))
             for oi in order:
                 h_len, mb_idx = mb_schedule[int(oi)]
@@ -483,7 +486,7 @@ def main() -> None:
                 q_opt.step()
                 q_loss_sum += float(q_mse.item())
 
-                if b_model is not None and b_opt is not None and bt_f is not None and bm_f is not None:
+                if _ep == 0 and b_model is not None and b_opt is not None and bt_f is not None and bm_f is not None:
                     bt_mb = bt_f[mb_idx]
                     bm_mb = bm_f[mb_idx]
                     with _autocast(device):
@@ -494,6 +497,7 @@ def main() -> None:
                     torch.nn.utils.clip_grad_norm_(b_model.parameters(), 2.0)
                     b_opt.step()
                     b_loss_sum += float(b_ce.item())
+                    n_b_mb += 1
 
                 n_mb += 1
 
@@ -513,7 +517,7 @@ def main() -> None:
             if args.aux_own_coef > 0.0:
                 msg += f" own_ce={own_loss_sum / max(1, n_mb):.4f}"
             if train_belief_now:
-                msg += f" b_ce={b_loss_sum / max(1, n_mb):.4f}"
+                msg += f" b_ce={b_loss_sum / max(1, n_b_mb):.4f}"
             print(msg, flush=True)
 
         if episodes_done >= next_eval or episodes_done >= args.episodes:

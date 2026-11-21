@@ -30,8 +30,11 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
             hanging = kHangChoices[rng() % 5];
         }
         Round r(deck, first, hanging);
+        // Mix standard natural bidding (at_bonus=0) and aggressive-AT natural bidding
+        // (at_bonus=8, closer to Kostov's Master table) without unnatural random bids.
+        const int at_bonus = (rng() & 1u) ? 8 : 0;
         while (r.decision() == Round::Decision::kBid) {
-            std::uint8_t bid = naturalBid(r);
+            std::uint8_t bid = naturalBidTuned(r, at_bonus);
             if (bid_noise_ > 0.0 && u(rng) < bid_noise_) {
                 const std::uint8_t avail = r.availableBids();
                 std::uint8_t opts[9];

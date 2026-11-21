@@ -364,7 +364,7 @@ struct Auction {
         return kPass;
     }
 
-    std::uint8_t choose(int p, const BidPower& hand) const {
+    std::uint8_t choose(int p, const BidPower& hand, int at_bonus = 0) const {
         const bool ours = rank >= 0 && teamOf(declarer) == teamOf(p);
         const int raiseBid = raise(p);
         int best = 0;
@@ -380,6 +380,7 @@ struct Auction {
         static constexpr int opening[] = {44, 44, 44, 44, 41, 43};
         for (int s = rank + 1; s < 6; ++s) {
             int v = hand.value[s] - opening[s];
+            if (s == 5) v += at_bonus;
             if (ours) v -= 17;  // respect a playable contract from partner
             if (s == 5 && lastSuit[partnerOf(p)] >= 0) v += 8;
             if (s == 4 && lastSuit[partnerOf(p)] >= 0) v += 3;
@@ -416,11 +417,13 @@ struct FiveCardHands {
 
 }  // namespace
 
-std::uint8_t naturalBid(const Round& r) {
+std::uint8_t naturalBid(const Round& r) { return naturalBidTuned(r, 0); }
+
+std::uint8_t naturalBidTuned(const Round& r, int at_bonus) {
     if (r.decision() != Round::Decision::kBid) throw std::logic_error("naturalBid: not bidding");
     Auction auction;
     for (auto [seat, bid] : r.bids()) auction.record(seat, bid);
-    return auction.choose(r.toMove(), BidPower(r.hand(r.toMove())));
+    return auction.choose(r.toMove(), BidPower(r.hand(r.toMove())), at_bonus);
 }
 
 double auctionLogLik(const PublicState& ps, const Hands& hands) {
