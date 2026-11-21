@@ -49,6 +49,7 @@ add_library(belote_search STATIC
     search/rollout.cpp
     agents/agents.cpp
     agents/duel.cpp
+    belote/batch_env.cpp
 )
 target_include_directories(belote_search SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ismcsolver/include)
 target_link_libraries(belote_search PUBLIC belote_core Threads::Threads)

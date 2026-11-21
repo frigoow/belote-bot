@@ -164,3 +164,42 @@ def test_zero_hidden_information_leakage():
         np.testing.assert_array_equal(h0, h1)
         tested += 1
     assert tested >= 20
+
+
+def test_batch_play_env_invariants():
+    env = bc.BatchPlayEnv(num_envs=32, config=bc.Config.belgian(), seed=7, bid_jitter=0.8)
+    rng = np.random.default_rng(7)
+    finished_deals = 0
+    for step in range(40):
+        batch = env.observe_batch(include_history=True, include_beliefs=True)
+        assert batch["state"].shape == (32, STATE_DIM)
+        assert batch["history"].shape == (32, MAX_PLIES, PLY_DIM)
+        assert batch["legal_actions"].shape == (32, bc.MAX_LEGAL, ACTION_DIM)
+        assert batch["belief_targets"].shape == (32, 32)
+        assert batch["belief_allowed"].shape == (32, 32, 3)
+
+        # Spot-check parity with single-env encode_observation and belief invariants.
+        for b in range(4):
+            d = env.deal(b)
+            obs = bc.observe(d, d.current_player)
+            s, h, n = bc.encode_observation(obs)
+            np.testing.assert_array_equal(batch["state"][b], s)
+            np.testing.assert_array_equal(batch["history"][b], h)
+            assert batch["n_plies"][b] == n
+
+        bt = batch["belief_targets"]
+        ba = batch["belief_allowed"]
+        for b in range(32):
+            for cc in range(32):
+                if bt[b, cc] >= 0:
+                    # True hidden card owner must ALWAYS be permitted by inferConstraints.
+                    assert ba[b, cc, bt[b, cc]] == 1
+                else:
+                    assert ba[b, cc].sum() == 0
+
+        acts = (rng.integers(0, 1000, size=32) % batch["n_legal"]).astype(np.int32)
+        done, rew = env.step_batch(acts)
+        finished_deals += int(done.sum())
+        assert np.all(np.abs(rew) <= 30.0)
+    assert finished_deals == 32  # 32 plies per deal -> all 32 finish at step 31
+

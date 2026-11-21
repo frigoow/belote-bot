@@ -8,3 +8,6 @@ cpp/build-*/
 *.so
 __pycache__/
 .pytest_cache/
+checkpoints/
+*.pt
+*.onnx

@@ -7,6 +7,7 @@
 
 #include "agents/agent.h"
 #include "agents/duel.h"
+#include "belote/batch_env.h"
 #include "belote/card.h"
 #include "belote/deal.h"
 #include "belote/encoder.h"
@@ -310,6 +311,77 @@ PYBIND11_MODULE(belote_cpp, m) {
             return py::make_tuple(state, hist, n);
         },
         py::arg("observation"));
+
+    // ------------------------------------------------------------ batched self-play env
+    m.attr("MAX_LEGAL") = kMaxLegal;
+    py::class_<BatchPlayEnv>(m, "BatchPlayEnv")
+        .def(py::init<int, const Config&, std::uint64_t, double, double>(), py::arg("num_envs"),
+             py::arg("config") = Config::belgian(), py::arg("seed") = 1, py::arg("bid_threshold") = 5.0,
+             py::arg("bid_jitter") = 0.8)
+        .def_property_readonly("num_envs", &BatchPlayEnv::numEnvs)
+        .def("reset_all", &BatchPlayEnv::resetAll, py::arg("seed"))
+        .def("deal", &BatchPlayEnv::deal, py::arg("env"), py::return_value_policy::reference_internal)
+        .def(
+            "observe_batch",
+            [](const BatchPlayEnv& env, bool include_history, bool include_beliefs) {
+                const int B = env.numEnvs();
+                const int hb = include_history ? B : 0;
+                const int bb = include_beliefs ? B : 0;
+                py::array_t<float> state(std::vector<py::ssize_t>{B, kStateDim});
+                py::array_t<float> hist(std::vector<py::ssize_t>{hb, kMaxPlies, kPlyDim});
+                py::array_t<std::int32_t> n_plies(B);
+                py::array_t<float> legal_actions(std::vector<py::ssize_t>{B, kMaxLegal, kActionDim});
+                py::array_t<std::int32_t> legal_cards(std::vector<py::ssize_t>{B, kMaxLegal});
+                py::array_t<std::int32_t> n_legal(B);
+                py::array_t<std::int32_t> current_team(B);
+                py::array_t<std::int8_t> belief_targets(std::vector<py::ssize_t>{bb, kCards});
+                py::array_t<std::uint8_t> belief_allowed(std::vector<py::ssize_t>{bb, kCards, 3});
+                float* s_ptr = state.mutable_data();
+                float* h_ptr = include_history ? hist.mutable_data() : nullptr;
+                std::int32_t* np_ptr = n_plies.mutable_data();
+                float* la_ptr = legal_actions.mutable_data();
+                std::int32_t* lc_ptr = legal_cards.mutable_data();
+                std::int32_t* nl_ptr = n_legal.mutable_data();
+                std::int32_t* ct_ptr = current_team.mutable_data();
+                std::int8_t* bt_ptr = include_beliefs ? belief_targets.mutable_data() : nullptr;
+                std::uint8_t* ba_ptr = include_beliefs ? belief_allowed.mutable_data() : nullptr;
+                {
+                    py::gil_scoped_release release;
+                    env.observeBatch(s_ptr, h_ptr, np_ptr, la_ptr, lc_ptr, nl_ptr, ct_ptr, bt_ptr, ba_ptr);
+                }
+                py::dict out;
+                out["state"] = state;
+                if (include_history) out["history"] = hist;
+                out["n_plies"] = n_plies;
+                out["legal_actions"] = legal_actions;
+                out["legal_cards"] = legal_cards;
+                out["n_legal"] = n_legal;
+                out["current_team"] = current_team;
+                if (include_beliefs) {
+                    out["belief_targets"] = belief_targets;
+                    out["belief_allowed"] = belief_allowed;
+                }
+                return out;
+            },
+            py::arg("include_history") = true, py::arg("include_beliefs") = true)
+        .def(
+            "step_batch",
+            [](BatchPlayEnv& env, py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> action_idx) {
+                const int B = env.numEnvs();
+                if (action_idx.ndim() != 1 || action_idx.shape(0) != B)
+                    throw py::value_error("action_idx must have shape (num_envs,)");
+                py::array_t<std::uint8_t> done(B);
+                py::array_t<float> reward_t0(B);
+                const std::int32_t* act_ptr = action_idx.data();
+                std::uint8_t* done_ptr = done.mutable_data();
+                float* rew_ptr = reward_t0.mutable_data();
+                {
+                    py::gil_scoped_release release;
+                    env.stepBatch(act_ptr, done_ptr, rew_ptr);
+                }
+                return py::make_tuple(done, reward_t0);
+            },
+            py::arg("action_idx"));
 
     py::class_<World>(m, "World")
         .def(py::init<>())
