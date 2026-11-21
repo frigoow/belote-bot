@@ -67,12 +67,23 @@ add_executable(belote_rule_review tools/rule_review.cpp)
 target_link_libraries(belote_rule_review PRIVATE belote_search)
 
 # Bulgarian Bridge-Belot (Kostov's BelotGameEngine rules), cross-checked by test_bg.
-add_library(belote_bg STATIC bg/bg.cpp)
-target_link_libraries(belote_bg PUBLIC belote_core)
+add_library(belote_bg STATIC
+    bg/bg.cpp
+    bg/view.cpp
+    bg/agent.cpp
+)
+target_link_libraries(belote_bg PUBLIC belote_core Threads::Threads)
 target_compile_options(belote_bg PRIVATE ${BELOTE_WARNINGS})
 add_executable(belote_test_bg tests/test_bg.cpp)
 target_link_libraries(belote_test_bg PRIVATE belote_bg)
 add_test(NAME bg COMMAND belote_test_bg)
+add_executable(belote_test_bg_agent tests/test_bg_agent.cpp)
+target_link_libraries(belote_test_bg_agent PRIVATE belote_bg)
+add_test(NAME bg_agent COMMAND belote_test_bg_agent)
+add_executable(bg_agent tools/bg_agent.cpp)
+target_link_libraries(bg_agent PRIVATE belote_bg)
+add_executable(bg_duel tools/bg_duel.cpp)
+target_link_libraries(bg_duel PRIVATE belote_bg)
 
 foreach(test rules random sampler search rule_agent)
     add_executable(belote_test_${test} tests/test_${test}.cpp)

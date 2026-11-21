@@ -13,3 +13,5 @@ checkpoints/
 *.onnx
 bg/oracle/bin/
 bg/oracle/obj/
+bg/bridge/bin/
+bg/bridge/obj/

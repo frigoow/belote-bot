@@ -106,6 +106,10 @@ struct RoundResult {
 // ScoreManager.GetScore. won[t]: cards team t took; announces with scored == 1 count.
 RoundResult scoreRound(std::uint8_t contract, int contract_player, Mask won_sn, Mask won_ew,
                        const std::vector<Announce>& announces, int hanging, int last_trick_winner);
+// The second half of scoreRound: from each team's raw total (cards, last 10,
+// scoring declarations), before the no-trumps doubling and the capot bonus.
+RoundResult finalizeScore(std::uint8_t contract, int contract_player, int sn_raw, int ew_raw, bool sn_none,
+                          bool ew_none, int hanging);
 int roundPoints(std::uint8_t contract, int points, bool winner);
 
 // One deal: auction, declarations, eight tricks, score. Seats whose only
@@ -135,6 +139,7 @@ public:
 
     // State.
     int first() const { return first_; }
+    int hangingBefore() const { return hanging_; }
     Mask hand(int seat) const { return hands_[seat]; }
     std::uint8_t contract() const { return contract_; }
     int contractPlayer() const { return contract_player_; }

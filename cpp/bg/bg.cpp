@@ -270,23 +270,31 @@ int roundPoints(std::uint8_t contract, int points, bool winner) {
 
 RoundResult scoreRound(std::uint8_t contract, int contract_player, Mask won_sn, Mask won_ew,
                        const std::vector<Announce>& announces, int hanging, int last_trick_winner) {
-    RoundResult r;
+    int sn = 0, ew = 0;
     for (const Announce& a : announces) {
         if (a.scored != 1) continue;
-        (teamOf(a.player) == 0 ? r.sn_total : r.ew_total) += a.value();
+        (teamOf(a.player) == 0 ? sn : ew) += a.value();
     }
-    for (Mask m = won_sn; m; m &= m - 1) r.sn_total += cardValue(lowestCard(m), contract);
-    for (Mask m = won_ew; m; m &= m - 1) r.ew_total += cardValue(lowestCard(m), contract);
-    (teamOf(last_trick_winner) == 0 ? r.sn_total : r.ew_total) += 10;
+    for (Mask m = won_sn; m; m &= m - 1) sn += cardValue(lowestCard(m), contract);
+    for (Mask m = won_ew; m; m &= m - 1) ew += cardValue(lowestCard(m), contract);
+    (teamOf(last_trick_winner) == 0 ? sn : ew) += 10;
+    return finalizeScore(contract, contract_player, sn, ew, won_sn == 0, won_ew == 0, hanging);
+}
+
+RoundResult finalizeScore(std::uint8_t contract, int contract_player, int sn_raw, int ew_raw, bool sn_none,
+                          bool ew_none, int hanging) {
+    RoundResult r;
+    r.sn_total = sn_raw;
+    r.ew_total = ew_raw;
     if (contract & kNoTrumps) {
         r.sn_total *= 2;
         r.ew_total *= 2;
     }
-    if (!won_sn) {
+    if (sn_none) {
         r.ew_total += 90;
         r.no_tricks = true;
     }
-    if (!won_ew) {
+    if (ew_none) {
         r.sn_total += 90;
         r.no_tricks = true;
     }

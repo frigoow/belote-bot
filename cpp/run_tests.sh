@@ -17,7 +17,11 @@ for test in rules random sampler search rule_agent; do
     "$cxx" "${flags[@]}" "${sources[@]}" "$here/tests/test_$test.cpp" -o "$out/test_$test"
     "$out/test_$test" || status=1
 done
-# Bulgarian Belot engine against the oracle log of Kostov's engine (bg/oracle).
-"$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tests/test_bg.cpp" -o "$out/test_bg"
-"$out/test_bg" || status=1
+# Bulgarian Belot engine, sampler, agent and tools.
+"$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tools/bg_agent.cpp" -o "$out/bg_agent"
+"$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tools/bg_duel.cpp" -o "$out/bg_duel"
+for test in bg bg_agent; do
+    "$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tests/test_$test.cpp" -o "$out/test_$test"
+    "$out/test_$test" || status=1
+done
 exit $status
