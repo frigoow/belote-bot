@@ -6,6 +6,7 @@ import random
 import numpy as np
 import torch
 
+import belote_cpp as bc
 from belote.bidding import (
     AUCTION_FEAT_DIM,
     MATCH_CTX_DIM,
@@ -15,6 +16,11 @@ from belote.bidding import (
     encode_match_context,
 )
 from belote.match_equity import estimate_outcome_dist, solve_match_equity
+from belote.train_bidding import (
+    choose_bid_with_bidnet,
+    collect_outcome_dataset,
+    expected_v_from_buckets,
+)
 
 
 def _permute_mask(mask: int, perm: tuple[int, int, int, int]) -> int:
@@ -73,3 +79,26 @@ def test_bidnet_and_match_context():
     vals = bidnet(af, mc)
     assert vals.shape == (4, 2)
     assert torch.all((vals >= 0.0) & (vals <= 1.0))
+
+
+def test_bidding_pipeline_smoke():
+    cfg = bc.Config.belgian()
+    X, Y, buckets = collect_outcome_dataset(num_deals=60, config=cfg, seed=9)
+    assert len(X) > 30
+    assert X.shape[1] == AUCTION_FEAT_DIM
+    assert len(buckets) >= 5
+
+    dist = estimate_outcome_dist(num_deals=300, seed=2)
+    table = solve_match_equity(dist, target=101, margin=2, pot_cap=32)
+    don = DealOutcomeNet(num_buckets=len(buckets))
+    bidnet = BidNet()
+    don.eval()
+    bidnet.eval()
+
+    probs = np.full(len(buckets), 1.0 / len(buckets), dtype=np.float64)
+    ev = expected_v_from_buckets(probs, buckets, table, 50, 50, 0, 0)
+    assert 0.0 <= ev <= 1.0
+
+    deal = bc.Deal(cfg, 0, list(range(32)))
+    bid = choose_bid_with_bidnet(deal, 0, don, bidnet, buckets, table, 50, 50, 0, 1, torch.device("cpu"))
+    assert bid in deal.legal_bids()
