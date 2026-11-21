@@ -28,7 +28,7 @@ struct BatchStepResult {
 class BatchPlayEnv {
 public:
     BatchPlayEnv(int num_envs, const Config& cfg = Config::belgian(), std::uint64_t seed = 1,
-                 double bid_threshold = 5.0, double bid_jitter = 0.8);
+                 double bid_threshold = 5.0, double bid_jitter = 0.8, int threads = 4);
 
     int numEnvs() const { return num_envs_; }
     const Config& config() const { return cfg_; }
@@ -58,13 +58,14 @@ public:
     const Deal& deal(int env) const { return deals_[std::size_t(env)]; }
 
 private:
-    Deal makeFreshDeal();
+    Deal makeFreshDeal(std::mt19937_64& rng) const;
 
     int num_envs_ = 0;
+    int threads_ = 1;
     Config cfg_;
     double bid_threshold_ = 5.0;
     double bid_jitter_ = 0.8;
-    std::mt19937_64 rng_;
+    std::vector<std::mt19937_64> rngs_;
     std::vector<Deal> deals_;
     std::vector<std::array<std::int32_t, kMaxLegal>> cached_legal_;
     std::vector<int> cached_n_legal_;

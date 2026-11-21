@@ -316,9 +316,9 @@ PYBIND11_MODULE(belote_cpp, m) {
     // ------------------------------------------------------------ batched self-play env
     m.attr("MAX_LEGAL") = kMaxLegal;
     py::class_<BatchPlayEnv>(m, "BatchPlayEnv")
-        .def(py::init<int, const Config&, std::uint64_t, double, double>(), py::arg("num_envs"),
+        .def(py::init<int, const Config&, std::uint64_t, double, double, int>(), py::arg("num_envs"),
              py::arg("config") = Config::belgian(), py::arg("seed") = 1, py::arg("bid_threshold") = 5.0,
-             py::arg("bid_jitter") = 0.8)
+             py::arg("bid_jitter") = 0.8, py::arg("threads") = 4)
         .def_property_readonly("num_envs", &BatchPlayEnv::numEnvs)
         .def("reset_all", &BatchPlayEnv::resetAll, py::arg("seed"))
         .def("deal", &BatchPlayEnv::deal, py::arg("env"), py::return_value_policy::reference_internal)
