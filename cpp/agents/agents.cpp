@@ -329,6 +329,7 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
             else if (parts[i] == "race") o.race = true;
             else if (parts[i] == "me") o.use_match_equity = true;
             else if (parts[i] == "auct") o.weight_auction = true;
+            else if (parts[i] == "hauct") o.weight_fast_auction = true;
             else if (parts[i].rfind("at", 0) == 0) {
                 o.weight_auction = true;
                 o.auction_lik_temp = std::stod(parts[i].substr(2));

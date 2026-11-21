@@ -1,5 +1,6 @@
 #include "search/fast_policy.h"
 
+#include "agents/agent.h"
 #include "belote/sampler.h"
 #include "search/belote_game.h"
 #include "search/bid_model.h"
@@ -266,6 +267,96 @@ double auctionHistoryLogLik(const Observation& obs, const World& w, const BidMod
     return total_ll;
 }
 
+// Fast (<2 us/world) logistic auction-history log-likelihood using ruleHandValue
+// marginalized over 8 random 5/3 splits per unseen seat.
+double fastAuctionLogLik(const Observation& obs, const World& w, std::mt19937_64& rng,
+                         std::unordered_map<std::uint64_t, double>& cache) {
+    if (obs.bids_made < 0 || obs.blik == kNoCard) return 0.0;
+    const int n_pass = obs.bids_made;
+    const int blik_suit = suitOf(obs.blik);
+    constexpr double kThr = 5.0;
+    constexpr double kSlope = 0.85;  // calibrated soft logistic slope (preserves healthy ESS)
+    double total_ll = 0.0;
+
+    auto logSig = [](double z) -> double {
+        return (z >= 0.0) ? -std::log1p(std::exp(-z)) : (z - std::log1p(std::exp(z)));
+    };
+
+    for (int p = 0; p < kPlayers; ++p) {
+        if (p == obs.observer) continue;
+        std::pair<int, Bid> acts[2];
+        int n_acts = 0;
+        for (int k = 0; k <= n_pass; ++k) {
+            if (((obs.dealer + 1 + k) & 3) != p) continue;
+            if (k < n_pass) acts[n_acts++] = {k, Bid::pass()};
+            else acts[n_acts++] = {k, (k < 4) ? Bid::take() : Bid::choose(obs.trump)};
+        }
+        if (n_acts == 0) continue;
+
+        const Mask h8 = w.hands[p];
+        const std::uint64_t key = (std::uint64_t(p) << 32) | std::uint64_t(h8);
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            total_ll += it->second;
+            continue;
+        }
+
+        Mask pool_m = (p == obs.taker) ? (h8 & ~bit(obs.blik)) : h8;
+        int pool[8];
+        int pool_n = 0;
+        for (Mask m = pool_m; m; m &= m - 1) pool[pool_n++] = lowestCard(m);
+        if (pool_n < 5) continue;
+
+        constexpr int kSplits = 8;
+        double lls[kSplits];
+        double max_ll = -std::numeric_limits<double>::infinity();
+        for (int s = 0; s < kSplits; ++s) {
+            int perm[8];
+            for (int i = 0; i < pool_n; ++i) perm[i] = pool[i];
+            Mask h5 = 0;
+            for (int i = 0; i < 5; ++i) {
+                const int j = i + int(rng() % std::uint64_t(pool_n - i));
+                std::swap(perm[i], perm[j]);
+                h5 |= bit(perm[i]);
+            }
+            const Mask k6 = h5 | bit(obs.blik);
+            double joint = 0.0;
+            for (int ai = 0; ai < n_acts; ++ai) {
+                const int nk = acts[ai].first;
+                const Bid b = acts[ai].second;
+                if (nk < 4) {
+                    const double v = ruleHandValue(k6, blik_suit);
+                    const double z = kSlope * (v - kThr);
+                    joint += (b.kind == Bid::kPass) ? logSig(-z) : logSig(z);
+                } else {
+                    double best_v = -1e9;
+                    double chosen_v = -1e9;
+                    for (int su = 0; su < kSuits; ++su) {
+                        if (!obs.cfg.round2_allow_blik_suit && su == blik_suit) continue;
+                        const double v = ruleHandValue(k6, su);
+                        if (v > best_v) best_v = v;
+                        if (b.kind == Bid::kChoose && su == b.suit) chosen_v = v;
+                    }
+                    const double z = kSlope * (best_v - kThr);
+                    if (b.kind == Bid::kPass) {
+                        joint += logSig(-z);
+                    } else {
+                        joint += logSig(z) + kSlope * (chosen_v - best_v);
+                    }
+                }
+            }
+            lls[s] = joint;
+            max_ll = std::max(max_ll, joint);
+        }
+        double sum_e = 0.0;
+        for (int s = 0; s < kSplits; ++s) sum_e += std::exp(lls[s] - max_ll);
+        const double marg_ll = max_ll + std::log(sum_e / double(kSplits));
+        cache.emplace(key, marg_ll);
+        total_ll += marg_ll;
+    }
+    return total_ll;
+}
+
 }  // namespace
 
 HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const HybridOptions& options) {
@@ -346,6 +437,8 @@ HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const
             if (use_auct && max_w > 1) {
                 lw += auctionHistoryLogLik(root_obs, w, *options.bid_model, options.match_scores, options.match_pot,
                                            options.auction_lik_temp, options.auction_splits, rng, auct_cache);
+            } else if (options.weight_fast_auction && root_obs.bids_made >= 0 && max_w > 1) {
+                lw += fastAuctionLogLik(root_obs, w, rng, auct_cache);
             }
             logw.push_back(lw);
 

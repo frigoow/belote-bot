@@ -66,6 +66,7 @@ struct HybridOptions {
     const BidModel* bid_model = nullptr;
     bool use_match_equity = false;
     bool weight_auction = false;
+    bool weight_fast_auction = false; // <2 us/world logistic ruleHandValue 5/3-split auction weight
     double auction_lik_temp = 0.04;
     int auction_splits = 4;          // 5/3-split Monte Carlo subsets per seat
     std::array<int, 2> match_scores = {0, 0};
