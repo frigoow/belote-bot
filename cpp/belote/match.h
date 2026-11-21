@@ -22,6 +22,10 @@ struct RecordedDeal {
 };
 RecordedDeal recordDeal(const DealResult& result, const Config& cfg);
 
+// Project one deal onto the scoreboard, including a previous hanging pot.
+// Returns the match winner, or -1 if the match continues.
+int applyDealScore(const DealResult& result, const Config& cfg, std::array<int, 2>& scores, int& pot);
+
 class Match {
 public:
     explicit Match(const Config& cfg, int first_dealer = 0);

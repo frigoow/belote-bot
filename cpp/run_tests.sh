@@ -13,7 +13,7 @@ sources=("$here"/belote/*.cpp "$here"/search/*.cpp "$here"/agents/*.cpp)
 
 "$cxx" "${flags[@]}" "${sources[@]}" "$here/tools/duel.cpp" -o "$out/belote_duel"
 status=0
-for test in rules random sampler search; do
+for test in rules random sampler search rule_agent; do
     "$cxx" "${flags[@]}" "${sources[@]}" "$here/tests/test_$test.cpp" -o "$out/test_$test"
     "$out/test_$test" || status=1
 done

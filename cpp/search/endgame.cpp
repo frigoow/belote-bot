@@ -12,6 +12,13 @@
 
 namespace belote {
 
+double matchFinishValue(const DealResult& result, const Config& cfg, std::array<int, 2> scores, int pot) {
+    const int winner = applyDealScore(result, cfg, scores, pot);
+    if (winner >= 0) return winner == 0 ? 1.0 : -1.0;
+    const double lead = double(scores[0]) - scores[1];
+    return lead / (std::abs(lead) + recordedPoints(kDealPoints, cfg) + pot);
+}
+
 namespace {
 
 constexpr int kInf = 1000000;
@@ -144,12 +151,14 @@ struct RootScoring {
             held = T;
         }
 
-        if (objective == EndgameObjective::kMatchEquity && bid_model) {
+        if ((objective == EndgameObjective::kMatchEquity && bid_model) || objective == EndgameObjective::kMatchFinish) {
             DealResult dr;
             dr.outcome = outcome;
             dr.takers = takers;
             dr.credited = credited;
             dr.held = held;
+            if (objective == EndgameObjective::kMatchFinish)
+                return int(std::lround(10000 * matchFinishValue(dr, cfg, match_scores, match_pot)));
             const double v0 =
                 bid_model->evalDealEquity(dr, cfg, dealer, 0, match_scores[0], match_scores[1], match_pot);
             return int(std::llround(10000.0 * (2.0 * v0 - 1.0)));

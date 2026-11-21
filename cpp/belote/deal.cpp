@@ -155,14 +155,17 @@ Deal::Deal(const Config& cfg, int dealer, const std::array<int, kCards>& deck) :
 }
 
 Deal Deal::fromPlay(const Config& cfg, int dealer, int taker, int trump,
-                    const std::array<Mask, kPlayers>& hands) {
+                    const std::array<Mask, kPlayers>& hands, int blik, int passes) {
     Mask all = 0;
     for (Mask h : hands) {
         if (popcount(h) != kTricks || (all & h)) throw std::invalid_argument("hands must be 4 disjoint 8-card hands");
         all |= h;
     }
     Deal d(cfg, dealer);
-    d.bids_made_ = -1;
+    if (blik != kNoCard && (blik < 0 || blik >= kCards || taker < 0 || taker >= kPlayers || !(hands[taker] & bit(blik))))
+        throw std::invalid_argument("the taker must hold the blik");
+    d.blik_ = blik;
+    d.bids_made_ = passes;
     d.hands_ = hands;
     d.taker_ = taker;
     d.trump_ = trump;

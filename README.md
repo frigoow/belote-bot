@@ -75,7 +75,26 @@ Full 101-point matches (`--mode match`, mirrored pairs, `Config::belgian()`):
 
 ### Rule agent
 
-The policy is described in `cpp/agents/rule_agent.h`. Every switch was kept or dropped by head-to-head rule2 duels (results next to each `RuleParams` field). Two of them come from the manual table review in `reports/manual-table-review/`. Recommended full agent: `ruleplay:128:ab4:simbid512`.
+`rule2` uses the public auction, shown cards and its own hand. It favors a discard that sets up a valuable ruff, supports the taker on an opening trump lead, and weighs known declarations and trump length when bidding. From trick five, if at most 48 layouts remain before the final declaration checks, it compares the possible endings. It changes its initial play only when the alternative scores at least as well under best play in every compatible layout and better in at least one. In matches, the comparison accounts for the target, winning margin and hanging pot. The value of a continuing match is a heuristic based on the score lead. The [manual table review](reports/manual-table-review/strategy.md) records the original decisions and paired replays.
+
+Use `rule2:nocount` for the same bidding and table heuristics with the exhaustive check disabled. The full search agent is `ruleplay:128:ab4:simbid512`. Its early rollouts evaluate the final two tricks exactly, and its late searches and simulated bids use the current scoreboard when available. The match harness supplies it automatically. In a Python game loop, call `agent.set_match_state(match)` before each deal.
+
+Head-to-head results against a frozen copy of the previous rule agent use fresh shuffles, swapped teams and paired 95% confidence intervals. The deal counts below exclude decks on which both tables passed.
+
+| Revised agent | Comparison | Mirrored pairs | Seed | Result |
+|---|---|---:|---:|---:|
+| `rule2` | Full matches to 101 | 3,500 | 88102 | **57.53% ± 0.98 pp** wins |
+| `rule2` | Own bidding and card play | 32,335 | 88101 | **+0.714 ± 0.044** units/deal |
+| `rule2` | Same auction at both tables | 31,528 | 88103 | +0.567 ± 0.030 units/deal |
+| `rule2` | Same auction and a basic `rule` partner | 19,816 | 88108 | +0.305 ± 0.027 units/deal |
+| `rule2:nocount` | Own bidding and card play | 46,162 | 88104 | +0.277 ± 0.035 units/deal |
+| `rule2:nocount` | Full matches to 101 | 4,000 | 88111 | 52.79% ± 0.87 pp wins |
+| `rule2` | Bidding only, identical card player | 55,381 | 88112 | +0.165 ± 0.027 units/deal |
+| `ruleplay:32` | Same auction and 32 worlds per player | 6,482 | 88106 | +0.140 ± 0.093 units/deal |
+| `ruleplay:128:ab4` | Same auction and 128 worlds per player | 1,205 | 88107 | +0.220 ± 0.215 units/deal |
+| `ruleplay:128:ab4:simbid512` | Full matches to 101 | 1,200 | 88110 | 49.96% ± 1.66 pp wins |
+
+The revised `rule2` averaged 0.03 ms per card in the full-match comparison. For the full search agent, the initial 240-pair match run was 52.71% ± 3.76 pp (seed 88109), and the larger run above was consistent with even play. The following cross-agent benchmarks predate this revision.
 
 | A vs B (`Config::belgian()`) | Mode | Decks × 2 | Units | Raw points |
 |---|---|---:|---:|---:|

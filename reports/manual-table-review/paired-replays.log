@@ -1,0 +1,172 @@
+Paired table replays | teams 0/2 and 1/3 | all score pairs even-odd
+Each pair uses the same shuffle, auction and plays up to the named card.
+After that card the same rule2 players continue from the resulting position.
+The 505 pair changes the last manual choice. All remaining plays at seat 0 are forced.
+See the corresponding match log for earlier tricks and public declarations.
+
+Pair A | match 501, deal 3, trick 2, seat 2
+Play AS
+T2  3:KH 0:7C 1:JH 2:AS -> 0 | running 17-21
+T3  0:JC 1:7S[shows 10D JD QD][shows 10H JH QH] 2:10C 3:KC -> 0 | running 51-21
+T4  0:8C 1:9S 2:9C 3:AC -> 2 | running 76-21
+T5  2:7D 3:8D 0:AD 1:JD -> 0 | running 89-21
+T6  0:8S 1:QD 2:JS 3:QS -> 3 | running 89-29
+T7  3:7H 0:QC 1:QH 2:KD -> 0 | running 99-29
+T8  0:KS 1:10D 2:9D 3:10S -> 3 | running 99-63
+nat | cards 99-63 | toon 0-40 | belot 0-0 | units 0-20 | match 29-29 | pot 0
+Play JS
+T2  3:KH 0:7C 1:JH 2:JS -> 0 | running 8-21
+T3  0:JC 1:7S[shows 10D JD QD][shows 10H JH QH] 2:10C 3:KC -> 0 | running 42-21
+T4  0:8C 1:9S 2:9C 3:AC -> 2 | running 67-21
+T5  2:AS 3:QS 0:KS 1:JD -> 2 | running 87-21
+T6  2:7D 3:8D 0:AD 1:QD -> 0 | running 101-21
+T7  0:8S 1:QH 2:9D 3:10S -> 3 | running 101-34
+T8  3:7H 0:QC 1:10D 2:KD -> 0 | running 128-34
+made | cards 128-34 | toon 0-40 | belot 0-0 | units 13-7 | match 42-16 | pot 0
+
+Pair B | match 501, deal 6, trick 4, seat 1
+Play AC
+T4  3:AD 0:10D 1:AC 2:8S -> 3 | running 24-75
+T5  3:8H 0:7C 1:9H 2:JH -> 2 | running 26-75
+T6  2:QC 3:KC 0:10C 1:8C -> 0 | running 43-75
+T7  0:9C 1:QH 2:KH 3:8D -> 3 | running 43-82
+T8  3:KD 0:JC 1:AH 2:10H -> 3 | running 43-119
+made | cards 43-119 | toon 20-0 | belot 0-0 | units 6-12 | match 47-65 | pot 0
+Play 8C
+T4  3:AD 0:10D 1:8C 2:8S -> 3 | running 24-64
+T5  3:8H 0:7C 1:9H 2:JH -> 2 | running 26-64
+T6  2:QC 3:KC 0:9C 1:AC -> 1 | running 26-82
+T7  1:AH 2:KH 3:KD 0:JC -> 3 | running 26-103
+T8  3:8D 0:10C 1:QH 2:10H -> 3 | running 26-136
+made | cards 26-136 | toon 20-0 | belot 0-0 | units 5-13 | match 46-66 | pot 0
+
+Pair C | match 503, deal 5, trick 6, seat 2
+Play 10H
+T6  3:JC 0:AC 1:9C 2:10H -> 0 | running 48-75
+T7  0:8H 1:QH 2:JS 3:KH -> 3 | running 48-84
+T8  3:KC 0:QC 1:10C 2:QS -> 1 | running 48-114
+made | cards 48-114 | toon 0-150 | belot 0-0 | units 5-26 | match 79-26 | pot 0
+Play JS
+T6  3:JC 0:AC 1:9C 2:JS -> 0 | running 40-75
+T7  0:8H 1:QH 2:10H 3:KH -> 2 | running 57-75
+T8  2:QS 3:KC 0:QC 1:10C -> 2 | running 87-75
+made | cards 87-75 | toon 0-150 | belot 0-0 | units 9-22 | match 83-22 | pot 0
+
+Pair D | match 502, deal 1, trick 4, seat 1
+Play JH
+T4  2:9D 3:KD 0:JD 1:JH -> 3 | running 35-32
+T5  3:9C 0:AC 1:8C 2:10C -> 0 | running 56-32
+T6  0:9S 1:QS 2:KH 3:JC -> 0 | running 79-32
+T7  0:AS 1:10S 2:7H 3:QC -> 0 | running 103-32
+T8  0:7C 1:10H 2:QD 3:KC -> 3 | running 103-59
+nat | cards 103-59 | toon 0-40 | belot 0-0 | units 20-0 | match 20-0 | pot 0
+Play 8C
+T4  2:9D 3:KD 0:JD 1:8C -> 3 | running 35-30
+T5  3:9C 0:AC 1:QS 2:10C -> 1 | running 35-54
+T6  1:10H 2:7H 3:KC 0:AS -> 0 | running 60-54
+T7  0:9S 1:10S 2:KH 3:JC -> 0 | running 90-54
+T8  0:7C 1:JH 2:QD 3:QC -> 3 | running 90-72
+made | cards 90-72 | toon 0-40 | belot 0-0 | units 9-11 | match 9-11 | pot 0
+
+Pair E | match 502, deal 1, trick 5, seat 1
+Play QS
+T5  3:9C 0:AC 1:QS 2:10C -> 1 | running 35-54
+T6  1:10H 2:7H 3:KC 0:AS -> 0 | running 60-54
+T7  0:9S 1:10S 2:KH 3:JC -> 0 | running 90-54
+T8  0:7C 1:JH 2:QD 3:QC -> 3 | running 90-72
+made | cards 90-72 | toon 0-40 | belot 0-0 | units 9-11 | match 9-11 | pot 0
+Play 10S
+T5  3:9C 0:AC 1:10S 2:10C -> 1 | running 35-61
+T6  1:10H 2:7H 3:KC 0:AS -> 0 | running 60-61
+T7  0:9S 1:QS 2:KH 3:JC -> 0 | running 83-61
+T8  0:7C 1:JH 2:QD 3:QC -> 3 | running 83-79
+made | cards 83-79 | toon 0-40 | belot 0-0 | units 8-12 | match 8-12 | pot 0
+
+Pair F | match 502, deal 10, trick 5, seat 2
+Play 7S
+T5  2:7S 3:9C 0:8S 1:7D -> 0 | running 99-0
+T6  0:8D 1:AD 2:JD 3:QD -> 1 | running 99-16
+T7  1:AC 2:KD 3:9D 0:JC -> 1 | running 99-33
+T8  1:QC 2:10D 3:QH 0:KC -> 0 | running 129-33
+made | cards 129-33 | toon 0-0 | belot 0-0 | units 13-3 | match 84-83 | pot 0
+Play JD
+T5  2:JD 3:QD 0:8D 1:AD -> 1 | running 99-16
+T6  1:AC 2:7S 3:9C 0:JC -> 2 | running 112-16
+T7  2:10D 3:9D 0:KC 1:7D -> 2 | running 126-16
+T8  2:KD 3:QH 0:8S 1:QC -> 0 | running 146-16
+made | cards 146-16 | toon 0-0 | belot 0-0 | units 14-2 | match 85-82 | pot 0
+
+Pair G | match 502, deal 12, trick 5, seat 0
+Play 8C
+T5  2:10H 3:JH 0:8C 1:JS -> 2 | running 53-35
+T6  2:9H 3:QH 0:AD 1:QS -> 0 | running 70-35
+T7  0:7S 1:AS 2:10S 3:KS -> 1 | running 70-60
+T8  1:QC 2:QD 3:JC 0:9D -> 0 | running 102-60
+made | cards 102-60 | toon 0-0 | belot 0-0 | units 10-6 | match 101-104 | pot 0
+Play 7S
+T5  2:10H 3:JH 0:7S 1:JS -> 2 | running 53-35
+T6  2:9H 3:QH 0:AD 1:QS -> 0 | running 70-35
+T7  0:8C 1:QC 2:QD 3:JC -> 2 | running 78-35
+T8  2:10S 3:KS 0:9D 1:AS -> 0 | running 127-35
+made | cards 127-35 | toon 0-0 | belot 0-0 | units 12-4 | match 103-102 | pot 0
+
+Pair H | match 502, deal 4, trick 2, seat 1
+Play AC
+T2  3:10H 0:KH 1:AC 2:QH -> 3 | running 0-41
+T3  3:8H 0:8D 1:7C 2:7S -> 2 | running 0-41
+T4  2:8C 3:QC 0:KC 1:9C -> 0 | running 7-41
+T5  0:JC 1:10S 2:JS 3:KS -> 2 | running 43-41
+T6  2:JD 3:7D 0:QD 1:AD -> 1 | running 43-57
+T7  1:9S 2:8S 3:KD 0:10C -> 1 | running 43-85
+T8  1:AS 2:QS 3:9D 0:10D -> 1 | running 43-119
+made | cards 43-119 | toon 0-0 | belot 0-0 | units 4-12 | match 56-25 | pot 0
+Play 7C
+T2  3:10H 0:KH 1:7C 2:QH -> 3 | running 0-30
+T3  3:8H 0:8D 1:9C 2:7S -> 2 | running 0-30
+T4  2:8C 3:QC 0:KC 1:AC -> 1 | running 0-48
+T5  1:10S 2:JS 3:KS 0:10D -> 2 | running 44-48
+T6  2:JD 3:7D 0:QD 1:AD -> 1 | running 44-64
+T7  1:9S 2:8S 3:KD 0:JC -> 1 | running 44-84
+T8  1:AS 2:QS 3:9D 0:10C -> 1 | running 44-118
+made | cards 44-118 | toon 0-0 | belot 0-0 | units 4-12 | match 56-25 | pot 0
+
+Pair I | match 505, deal 9, trick 7, seat 0
+Play 9H
+T7  0:9H 1:8C 2:10D 3:QC -> 0 | running 84-55
+T8  0:7S 1:9S 2:QD 3:10S -> 3 | running 84-78
+nat | cards 84-78 | toon 0-20 | belot 20-0 | units 20-0 | match 81-69 | pot 0
+Play 7S
+T7  0:7S 1:9S 2:QD 3:10S -> 3 | running 57-68
+T8  3:QC 0:9H 1:8C 2:10D -> 0 | running 94-68
+nat | cards 94-68 | toon 0-20 | belot 20-0 | units 20-0 | match 81-69 | pot 0
+
+Pair J | match 501, deal 4, trick 3, seat 3
+Play AS
+T3  0:JH[shows JD QD KD] 1:10H 2:QH 3:AS -> 3 | running 30-37
+T4  3:9S 0:QS 1:KS 2:9C -> 3 | running 30-58
+T5  3:AC 0:QC 1:10C 2:JC -> 3 | running 30-84
+T6  3:7C 0:JD 1:8C 2:KC -> 2 | running 36-84
+T7  2:AD 3:8D 0:KD 1:7D -> 2 | running 51-84
+T8  2:KH 3:10D 0:QD 1:9D -> 2 | running 78-84
+nat | cards 78-84 | toon 20-0 | belot 0-0 | units 18-0 | match 47-29 | pot 0
+Play 10D
+T3  0:JH[shows JD QD KD] 1:10H 2:QH 3:10D -> 1 | running 30-36
+T4  1:7D 2:AD 3:8D 0:KD -> 2 | running 45-36
+T5  2:9C 3:AC 0:QC 1:10C -> 3 | running 45-60
+T6  3:9S 0:QS 1:KS 2:JC -> 3 | running 45-83
+T7  3:7C 0:JD 1:8C 2:KC -> 2 | running 51-83
+T8  2:KH 3:AS 0:QD 1:9D -> 3 | running 51-111
+made | cards 51-111 | toon 20-0 | belot 0-0 | units 7-11 | match 36-40 | pot 0
+
+Continuation of pair G after playing 7S
+Deal 13 | dealer 0 | blik QH | auction 1:pass 2:pass 3:take
+Taker 3 | trump H
+T1  1:9D 2:AD 3:7D[run4] 0:KD -> 2 | running 15-0
+T2  2:AC 3:QH 0:9C 1:KC -> 3 | running 15-18
+T3  3:JH[shows 9H 10H JH QH] 0:AH 1:KH 2:8H -> 3 | running 15-53
+T4  3:9H 0:8D 1:7H 2:7C -> 3 | running 15-67
+T5  3:10D 0:QC 1:QD 2:9S -> 3 | running 15-83
+T6  3:JD 0:JS 1:QS 2:JC -> 3 | running 15-92
+T7  3:7S 0:10S 1:8S 2:AS -> 2 | running 36-92
+T8  2:KS 3:10H 0:10C 1:8C -> 3 | running 36-126
+made | cards 36-126 | toon 0-50 | belot 0-0 | units 4-17 | match 107-119 | pot 0

@@ -1,0 +1,103 @@
+Match seed 505 | teams 0/2 and 1/3 | result columns even-odd
+
+Deal 1 | dealer 0 | blik QH | auction 1:pass 2:pass 3:pass 0:pass 1:pass 2:pass 3:pass 0:pass
+passed | cards 0-0 | toon 0-0 | belot 0-0 | units 0-0 | match 0-0 | pot 0
+
+Deal 2 | dealer 1 | blik 10S | auction 2:pass 3:pass 0:take
+Taker 0 | trump S
+T1  2:AD 3:7D 0:8D 1:JD[run3] -> 2 | running 13-0
+T2  2:8C 3:AC 0:9C 1:KC -> 3 | running 13-15
+T3  3:8H 0:AH 1:8S[shows JC QC KC] 2:7H -> 1 | running 13-26
+T4  1:10D 2:KS 3:9D 0:JS -> 0 | running 47-26
+T5  0:10C 1:7C 2:AS 3:7S -> 2 | running 68-26
+T6  2:9S 3:KH 0:10S 1:QS -> 2 | running 99-26
+T7  2:JH 3:QD 0:9H 1:JC -> 2 | running 106-26
+T8  2:QH 3:KD 0:10H 1:QC -> 0 | running 136-26
+made | cards 136-26 | toon 0-20 | belot 0-0 | units 13-5 | match 13-5 | pot 0
+
+Deal 3 | dealer 2 | blik 8C | auction 3:pass 0:pass 1:pass 2:take
+Taker 2 | trump C
+T1  3:7H[run3] 0:9H 1:AH 2:QH[run3] -> 1 | running 0-14
+T2  1:10H 2:7C 3:7D 0:KH -> 2 | running 14-14
+T3  2:JC 3:8S[shows 8S 9S 10S] 0:10C 1:KC -> 2 | running 48-14
+T4  2:9C 3:9S 0:KD 1:AC -> 2 | running 77-14
+T5  2:AD 3:JD 0:8D 1:9D -> 2 | running 90-14
+T6  2:JS 3:QS 0:AS 1:KS -> 0 | running 110-14
+T7  0:JH 1:8H 2:QC 3:10D -> 2 | running 125-14
+T8  2:8C 3:10S 0:7S 1:QD -> 2 | running 148-14
+made | cards 148-14 | toon 0-20 | belot 0-0 | units 15-3 | match 28-8 | pot 0
+
+Deal 4 | dealer 3 | blik QS | auction 0:take
+Taker 0 | trump S
+T1  0:JS[run4] 1:8S[run3] 2:10D[run3] 3:10S[run3] -> 0 | running 40-0
+T2  0:7S 1:9S 2:7C 3:AC -> 1 | running 40-25
+T3  1:10C 2:7D[shows 8H 9H 10H] 3:9C 0:8C[shows JS QS KS AS] -> 1 | running 40-35
+T4  1:8D 2:JD 3:QD 0:QS[belot] -> 0 | running 48-35
+T5  0:AH 1:QH 2:10H 3:7H -> 0 | running 72-35
+T6  0:KC 1:JC 2:8H 3:JH -> 0 | running 80-35
+T7  0:KS 1:9D 2:KH 3:KD -> 0 | running 92-35
+T8  0:AS 1:QC 2:9H 3:AD -> 0 | running 127-35
+made | cards 127-35 | toon 70-0 | belot 20-0 | units 21-4 | match 49-12 | pot 0
+
+Deal 5 | dealer 0 | blik 7C | auction 1:pass 2:pass 3:pass 0:pass 1:pass 2:pass 3:D
+Taker 3 | trump D
+T1  1:AH[run5+] 2:7H[run3] 3:KH[run4] 0:8H[run3] -> 1 | running 0-15
+T2  1:9C 2:8C 3:7C 0:KC -> 0 | running 4-15
+T3  0:AS 1:7S[shows 7S 8S 9S 10S JS] 2:10C 3:7D[shows 10D JD QD KD] -> 3 | running 4-36
+T4  3:JD 0:8D 1:9D 2:9H -> 3 | running 4-70
+T5  3:QD[belot] 0:AD 1:8S 2:10H -> 0 | running 28-70
+T6  0:QS 1:10S 2:JC 3:AC -> 1 | running 28-96
+T7  1:9S 2:QC 3:KD 0:KS -> 3 | running 28-107
+T8  3:10D 0:JH 1:JS 2:QH -> 3 | running 28-134
+made | cards 28-134 | toon 0-150 | belot 0-20 | units 3-30 | match 52-42 | pot 0
+
+Deal 6 | dealer 1 | blik JH | auction 2:pass 3:take
+Taker 3 | trump H
+T1  2:8C[run3] 3:AC 0:QC[run3] 1:JC[run3] -> 3 | running 0-16
+T2  3:JH 0:8H 1:KH 2:10H -> 3 | running 0-50
+T3  3:AD 0:7D 1:10D[shows QS KS AS] 2:QD -> 3 | running 0-74
+T4  3:7C 0:QH 1:7H 2:10C -> 0 | running 13-74
+T5  0:8D 1:JD 2:KD 3:AH -> 3 | running 13-91
+T6  3:8S 0:7S 1:QS 2:10S -> 2 | running 26-91
+T7  2:9C 3:9S 0:9D 1:KS -> 2 | running 30-91
+T8  2:KC 3:JS 0:9H 1:AS -> 0 | running 71-91
+made | cards 71-91 | toon 0-20 | belot 0-0 | units 7-11 | match 59-53 | pot 0
+
+Deal 7 | dealer 2 | blik QD | auction 3:pass 0:take
+Taker 0 | trump D
+T1  3:AC 0:9C 1:KC 2:JC -> 3 | running 0-17
+T2  3:AS 0:8S 1:JS 2:QS -> 3 | running 0-33
+T3  3:10S 0:9S 1:7S 2:8D -> 2 | running 10-33
+T4  2:10C 3:7C 0:KH 1:AD -> 1 | running 10-58
+T5  1:AH 2:7H 3:8H 0:KD[belot] -> 0 | running 25-58
+T6  0:7D 1:JD 2:10D 3:KS -> 1 | running 25-92
+T7  1:9H 2:JH 3:8C 0:QD -> 0 | running 30-92
+T8  0:9D 1:10H 2:QH 3:QC -> 0 | running 70-92
+nat | cards 70-92 | toon 0-0 | belot 20-0 | units 2-16 | match 61-69 | pot 0
+
+Deal 8 | dealer 3 | blik KS | auction 0:pass 1:pass 2:pass 3:pass 0:pass 1:pass 2:pass 3:pass
+passed | cards 0-0 | toon 0-0 | belot 0-0 | units 0-0 | match 61-69 | pot 0
+
+Deal 9 | dealer 0 | blik 10C | auction 1:pass 2:pass 3:pass 0:pass 1:H
+Taker 1 | trump H
+T1  1:JH 2:7H 3:8H[run3] 0:QH[belot] -> 1 | running 0-23
+T2  1:AC 2:7C 3:KC 0:9C -> 1 | running 0-38
+T3  1:10C 2:AH 3:JC[shows JC QC KC] 0:JD -> 2 | running 25-38
+T4  2:AD 3:KD 0:9D 1:7D -> 2 | running 40-38
+T5  2:8D 3:QS 0:KH 1:10H -> 1 | running 40-55
+T6  1:8S 2:JS 3:KS 0:AS -> 0 | running 57-55
+T7  0:7S 1:9S 2:QD 3:10S -> 3 | running 57-68
+T8  3:QC 0:9H 1:8C 2:10D -> 0 | running 94-68
+nat | cards 94-68 | toon 0-20 | belot 20-0 | units 20-0 | match 81-69 | pot 0
+
+Deal 10 | dealer 1 | blik QC | auction 2:pass 3:pass 0:pass 1:pass 2:pass 3:D
+Taker 3 | trump D
+T1  2:AS[run3] 3:9S 0:10H[run3] 1:7S -> 2 | running 21-0
+T2  2:10S 3:JD 0:7D 1:KS -> 3 | running 21-34
+T3  3:8H 0:9H[shows 9H 10H JH] 1:AH 2:KH[shows 10S JS QS] -> 1 | running 21-49
+T4  1:9D 2:8D 3:AD 0:KD -> 1 | running 21-78
+T5  1:8S 2:QS 3:7C 0:KC -> 2 | running 28-78
+T6  2:JS 3:QH 0:JC 1:8C -> 2 | running 35-78
+T7  2:10D 3:QC 0:AC 1:9C -> 2 | running 59-78
+T8  2:QD 3:10C 0:JH 1:7H -> 2 | running 84-78
+nat | cards 84-78 | toon 40-0 | belot 0-0 | units 20-0 | match 101-69 | pot 0

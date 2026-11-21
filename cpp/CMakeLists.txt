@@ -47,11 +47,13 @@ target_compile_options(belote_core PRIVATE ${BELOTE_WARNINGS})
 # ISMCTS (third_party/ismcsolver, MIT), endgame AB, rollouts, agents and harness.
 add_library(belote_search STATIC
     search/belote_game.cpp
+    search/bid_model.cpp
     search/endgame.cpp
     search/fast_policy.cpp
     search/ismcts.cpp
     search/rollout.cpp
     agents/agents.cpp
+    agents/rule_agent.cpp
     agents/duel.cpp
     belote/batch_env.cpp
 )
@@ -61,8 +63,10 @@ target_compile_options(belote_search PRIVATE ${BELOTE_WARNINGS})
 
 add_executable(belote_duel tools/duel.cpp)
 target_link_libraries(belote_duel PRIVATE belote_search)
+add_executable(belote_rule_review tools/rule_review.cpp)
+target_link_libraries(belote_rule_review PRIVATE belote_search)
 
-foreach(test rules random sampler search)
+foreach(test rules random sampler search rule_agent)
     add_executable(belote_test_${test} tests/test_${test}.cpp)
     target_link_libraries(belote_test_${test} PRIVATE belote_search)
     add_test(NAME ${test} COMMAND belote_test_${test})

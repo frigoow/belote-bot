@@ -23,7 +23,12 @@ enum class EndgameObjective {
     kUnits,        // recorded unit margin from recordDeal() (held-over excluded)
     kRaw,          // raw credited point margin
     kMatchEquity,  // exact scaled match equity: round(10000 * (2*V_team0 - 1))
+    kMatchFinish,  // bounded scoreboard heuristic for agents without an equity model
 };
+
+// Team 0 perspective. Terminal wins/losses score +/-1. Ongoing positions
+// use the score lead discounted by one deal and the outstanding pot.
+double matchFinishValue(const DealResult& result, const Config& cfg, std::array<int, 2> scores, int pot);
 
 struct EndgameOptions {
     EndgameObjective objective = EndgameObjective::kUnits;

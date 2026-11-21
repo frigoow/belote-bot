@@ -163,7 +163,7 @@ bool WorldSampler::admits(const World& w) const {
 Deal WorldSampler::replay(const World& w) const {
     std::array<Mask, kPlayers> start{};
     for (int p = 0; p < kPlayers; ++p) start[p] = w.hands[p] | obs_.playedBy(p);
-    Deal d = Deal::fromPlay(obs_.cfg, obs_.dealer, obs_.taker, obs_.trump, start);
+    Deal d = Deal::fromPlay(obs_.cfg, obs_.dealer, obs_.taker, obs_.trump, start, obs_.blik, obs_.bids_made);
     for (int p = 0; p < kPlayers; ++p) {
         if (!d.canSetDeclare(p)) continue;
         if (p == obs_.observer) d.setDeclare(p, obs_.declare_self);

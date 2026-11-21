@@ -78,9 +78,9 @@ public:
     Deal(const Config& cfg, int dealer, const std::array<int, kCards>& deck);
 
     // A deal that starts at the first trick with known 8-card hands (tests,
-    // cross-checks, samplers). No blik.
+    // cross-checks, samplers). Replays can retain the original public auction.
     static Deal fromPlay(const Config& cfg, int dealer, int taker, int trump,
-                         const std::array<Mask, kPlayers>& hands);
+                         const std::array<Mask, kPlayers>& hands, int blik = kNoCard, int passes = -1);
 
     const Config& config() const { return cfg_; }
     Phase phase() const { return phase_; }

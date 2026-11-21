@@ -926,11 +926,15 @@ PYBIND11_MODULE(belote_cpp, m) {
     // ------------------------------------------------------------ agents / harness
     py::class_<Agent>(m, "Agent")
         .def_property_readonly("name", &Agent::name)
+        .def("set_match_state", [](Agent& agent, const Match* match) {
+            agent.setMatchState(match ? MatchState{match->scores(), match->pot(), true} : MatchState{});
+        }, py::arg("match"), "Use the current scoreboard for this deal. Pass None to clear it.")
         .def("choose_bid", &Agent::chooseBid)
         .def("choose_declare", &Agent::chooseDeclare)
         .def("choose_card", &Agent::chooseCard, py::call_guard<py::gil_scoped_release>());
     m.def("make_agent", &makeAgent, py::arg("spec"), py::arg("seed") = 0,
-          "random | rule | ismcts:<iterations>[:<threads>] | rollout:<worlds>[:ab<trick>]");
+          "random | rule | rule2[:nocount] | ruleplay:<worlds>[:ab<trick>][:simbid<worlds>] | "
+          "ismcts:<iterations>[:<threads>] | rollout:<worlds>[:ab<trick>]");
     m.def("rule_hand_value", &ruleHandValue, py::arg("cards"), py::arg("trump"));
     m.def("rule_bid", &ruleBid, py::arg("deal"), py::arg("threshold") = 5.0);
     m.def("rule_choose_card", &ruleChooseCard, py::arg("deal"));
