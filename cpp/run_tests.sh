@@ -17,4 +17,7 @@ for test in rules random sampler search rule_agent; do
     "$cxx" "${flags[@]}" "${sources[@]}" "$here/tests/test_$test.cpp" -o "$out/test_$test"
     "$out/test_$test" || status=1
 done
+# Bulgarian Belot engine against the oracle log of Kostov's engine (bg/oracle).
+"$cxx" "${flags[@]}" "$here"/bg/*.cpp "$here/belote/card.cpp" "$here/tests/test_bg.cpp" -o "$out/test_bg"
+"$out/test_bg" || status=1
 exit $status

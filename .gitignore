@@ -11,3 +11,5 @@ __pycache__/
 checkpoints/
 *.pt
 *.onnx
+bg/oracle/bin/
+bg/oracle/obj/

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Plays seeded random Bulgarian Belot games through Nikolay Kostov's engine
+       (github.com/NikolayIT/BelotGameEngine, MIT) and logs every decision with
+       its legal options and every deal's score: the oracle the C++ engine in
+       cpp/bg/ is cross-checked against. Expects the engine checked out next to
+       this repository (../BelotGameEngine), or set BelotEngineDir. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <BelotEngineDir Condition="'$(BelotEngineDir)' == ''">$(MSBuildThisFileDirectory)../../../BelotGameEngine</BelotEngineDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(BelotEngineDir)/src/Belot.Engine/Belot.Engine.csproj" />
+  </ItemGroup>
+
+</Project>
