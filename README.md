@@ -54,6 +54,9 @@ Baseline ladder (`Config::belgian()`, rule bidder for every seat, A's margin per
 | rollout:32:ab4 vs rollout:32 | 2,246 | +0.40 ± 0.17 | +4.0 ± 1.8 | 0.51 |
 | rollout:32 vs ISMCTS-1000 | 1,797 | −0.24 ± 0.19 | −2.4 ± 2.0 | 0.19 |
 | rollout:32:ab4 vs ISMCTS-1000 | 1,797 | +0.10 ± 0.20 | +0.9 ± 2.0 | 0.56 |
+| fast (1.8M Q-GRU) vs rule | 911 | +1.56 ± 0.28 | +15.8 ± 2.9 | <0.01 |
+| hybrid:64:ab4 vs ISMCTS-1000 | 911 | **+0.48 ± 0.29** | **+4.6 ± 3.0** | 12.6 |
+| hybrid:64:ab4 vs ISMCTS-5000 | 450 | −0.05 ± 0.41 | −0.4 ± 4.1 | 12.4 |
 
 Full 101-point matches (`--mode match`, 200 mirrored pairs = 400 matches, fixed rule bidder): `rollout:32:ab4` beats `rule` **75.25% ± 3.47 pp** (+24.5 ± 2.1 units/match).
 
