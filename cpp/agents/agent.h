@@ -36,6 +36,8 @@ public:
     virtual void reseed(std::uint64_t) {}
     // Optional match scoreboard context for score-aware bidding and play.
     virtual void setMatchState(const MatchState&) {}
+    // Optional BidModel attachment (for M4 match-equity leaves & auction likelihood).
+    virtual void setBidModel(std::shared_ptr<const BidModel>) {}
     // Phase kBid1/kBid2, the agent's turn.
     virtual Bid chooseBid(const Deal& d) = 0;
     // Before the agent's first card (only asked when the choice is open).
@@ -162,18 +164,30 @@ public:
         rng_.seed(seed);
         seeded_ = seed != 0;
     }
+    void setMatchState(const MatchState& ms) override { ms_ = ms; }
+    void setBidModel(std::shared_ptr<const BidModel> bm) override { bid_model_ = std::move(bm); }
     Bid chooseBid(const Deal& d) override { return ruleBid(d); }
+    bool chooseDeclare(const Deal& d) override { return smartChooseDeclare(d); }
     int chooseCard(const Deal& d) override {
         HybridOptions o = options_;
         if (seeded_) {
             o.seed = rng_();
             if (o.seed == 0) o.seed = 1;
         }
+        if (bid_model_) o.bid_model = bid_model_.get();
+        if (ms_.valid) {
+            o.match_scores = ms_.scores;
+            o.match_pot = ms_.pot;
+        } else {
+            o.use_match_equity = false;
+        }
         return hybridSearch(d, *model_, o).best_move;
     }
 
 private:
     std::shared_ptr<const FastPolicyModel> model_;
+    std::shared_ptr<const BidModel> bid_model_;
+    MatchState ms_{};
     HybridOptions options_;
     std::string name_;
     std::mt19937_64 rng_;
@@ -194,7 +208,9 @@ public:
           search_margin_(search_margin),
           name_(std::move(label)),
           rng_(seed),
-          seeded_(seed != 0) {}
+          seeded_(seed != 0) {
+        if (player_ && bid_model_) player_->setBidModel(bid_model_);
+    }
 
     std::string name() const override { return name_; }
     void reseed(std::uint64_t seed) override {

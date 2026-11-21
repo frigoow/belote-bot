@@ -1,9 +1,11 @@
 #include "search/endgame.h"
 
 #include "belote/match.h"
+#include "search/bid_model.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -81,10 +83,14 @@ struct RootScoring {
     Config cfg;
     int takers = 0;
     int trump = 0;
+    int dealer = 0;
     int normal_toon_team = -1;
     std::array<int, 2> team_toon_pts{0, 0};
     int belot_holder = -1;
     EndgameObjective objective = EndgameObjective::kUnits;
+    const BidModel* bid_model = nullptr;
+    std::array<int, 2> match_scores{0, 0};
+    int match_pot = 0;
 
     int evalLeaf(const std::array<int, 2>& card_pts, const std::array<int, 2>& tricks_won,
                  bool belot_announced) const {
@@ -136,6 +142,17 @@ struct RootScoring {
             credited[defenders] = D;
             credited[takers] = 0;
             held = T;
+        }
+
+        if (objective == EndgameObjective::kMatchEquity && bid_model) {
+            DealResult dr;
+            dr.outcome = outcome;
+            dr.takers = takers;
+            dr.credited = credited;
+            dr.held = held;
+            const double v0 =
+                bid_model->evalDealEquity(dr, cfg, dealer, 0, match_scores[0], match_scores[1], match_pot);
+            return int(std::llround(10000.0 * (2.0 * v0 - 1.0)));
         }
 
         if (objective == EndgameObjective::kRaw) return credited[0] - credited[1];
@@ -344,12 +361,16 @@ private:
     std::uint32_t gen_ = 0;
 };
 
-void initEndgameRoot(const Deal& deal, EndgameObjective objective, RootScoring& sc, State& root) {
+void initEndgameRoot(const Deal& deal, const EndgameOptions& options, RootScoring& sc, State& root) {
     sc.cfg = deal.config();
     sc.takers = deal.takers();
     sc.trump = deal.trump();
+    sc.dealer = deal.dealer();
     sc.belot_holder = deal.belotHolder();
-    sc.objective = objective;
+    sc.objective = options.objective;
+    sc.bid_model = options.bid_model;
+    sc.match_scores = options.match_scores;
+    sc.match_pot = options.match_pot;
 
     // Precompute all toon totals once at the root (exact for every trick 0..7,
     // including mandatory declaring when toon_optional == false).
@@ -395,7 +416,7 @@ EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
 
     RootScoring sc;
     State root;
-    initEndgameRoot(deal, options.objective, sc, root);
+    initEndgameRoot(deal, options, sc, root);
 
     Solver solver(sc, options.tt_log2);
     const Mask legal = legalMask(root.hands[root.current], root.trick, sc.trump, root.current, sc.cfg);
@@ -443,9 +464,11 @@ EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
 
 int evaluateEndgameLine(const Deal& deal, const std::vector<int>& cards, EndgameObjective objective) {
     if (deal.phase() != Phase::kPlay) throw std::logic_error("evaluateEndgameLine: deal is not in kPlay");
+    EndgameOptions opts;
+    opts.objective = objective;
     RootScoring sc;
     State st;
-    initEndgameRoot(deal, objective, sc, st);
+    initEndgameRoot(deal, opts, sc, st);
     Solver solver(sc, 8);
     for (int card : cards) st = solver.apply(st, card);
     if (st.tricks_played != kTricks) throw std::logic_error("evaluateEndgameLine: line did not finish deal");

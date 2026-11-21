@@ -2,6 +2,7 @@
 
 #include "belote/sampler.h"
 #include "search/belote_game.h"
+#include "search/bid_model.h"
 #include "search/endgame.h"
 
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace belote {
 
@@ -182,6 +184,88 @@ double playHistoryLogLik(const Observation& root_obs, const World& w, const Fast
     return ll;
 }
 
+// M4 Auction-history log-likelihood for a sampled world with 5/3-split
+// marginalization (PLAN.md §3.2):
+// Each unseen seat p != observer acted 0, 1, or 2 times during the auction.
+// We average P(seat p's joint auction bids | hand_5) over S random 5-card
+// subsets of w.hands[p] (with blik excluded for taker since taker received blik
+// on top of their initial 5 cards) and cache per (seat, hand8) across worlds.
+double auctionHistoryLogLik(const Observation& obs, const World& w, const BidModel& bm,
+                            const std::array<int, 2>& match_scores, int match_pot, double temp, int splits,
+                            std::mt19937_64& rng, std::unordered_map<std::uint64_t, double>& cache) {
+    if (obs.bids_made < 0 || obs.blik == kNoCard) return 0.0;
+    const int n_pass = obs.bids_made;
+    double total_ll = 0.0;
+
+    for (int p = 0; p < kPlayers; ++p) {
+        if (p == obs.observer) continue;
+        // Collect this seat's (node_k, Bid) actions in chronological order (0, 1, or 2 actions).
+        std::pair<int, Bid> acts[2];
+        int n_acts = 0;
+        for (int k = 0; k <= n_pass; ++k) {
+            if (((obs.dealer + 1 + k) & 3) != p) continue;
+            if (k < n_pass) {
+                acts[n_acts++] = {k, Bid::pass()};
+            } else {
+                const Bid tb = (k < 4) ? Bid::take() : Bid::choose(obs.trump);
+                acts[n_acts++] = {k, tb};
+            }
+        }
+        if (n_acts == 0) continue;
+
+        const Mask h8 = w.hands[p];
+        const std::uint64_t key = (std::uint64_t(p) << 32) | std::uint64_t(h8);
+        auto it = cache.find(key);
+        if (it != cache.end()) {
+            total_ll += it->second;
+            continue;
+        }
+
+        // Pool of candidate cards for initial 5-card hand:
+        // taker always received blik after the auction, so initial 5 came from h8 \ {blik} (7 cards).
+        // non-takers' initial 5 came from h8 (8 cards).
+        Mask pool_m = (p == obs.taker) ? (h8 & ~bit(obs.blik)) : h8;
+        int pool[8];
+        int pool_n = 0;
+        for (Mask m = pool_m; m; m &= m - 1) pool[pool_n++] = lowestCard(m);
+        if (pool_n < 5) continue;
+
+        const int t_p = teamOf(p);
+        const int us = match_scores[t_p];
+        const int them = match_scores[1 - t_p];
+        const int we_deal = (teamOf(obs.dealer) == t_p) ? 1 : 0;
+
+        const int n_s = std::max(1, splits);
+        double lls[16];
+        const int eff_s = std::min(n_s, 16);
+        double max_ll = -std::numeric_limits<double>::infinity();
+        for (int s = 0; s < eff_s; ++s) {
+            // Partial Fisher-Yates to draw 5 cards uniformly without replacement.
+            int perm[8];
+            for (int i = 0; i < pool_n; ++i) perm[i] = pool[i];
+            Mask h5 = 0;
+            for (int i = 0; i < 5; ++i) {
+                const int j = i + int(rng() % std::uint64_t(pool_n - i));
+                std::swap(perm[i], perm[j]);
+                h5 |= bit(perm[i]);
+            }
+            double joint = 0.0;
+            for (int ai = 0; ai < n_acts; ++ai) {
+                joint += bm.bidLogProb(h5, obs.blik, acts[ai].first, obs.cfg, acts[ai].second, us, them, match_pot,
+                                       we_deal, temp);
+            }
+            lls[s] = joint;
+            max_ll = std::max(max_ll, joint);
+        }
+        double sum_e = 0.0;
+        for (int s = 0; s < eff_s; ++s) sum_e += std::exp(lls[s] - max_ll);
+        const double marg_ll = max_ll + std::log(sum_e / double(eff_s));
+        cache.emplace(key, marg_ll);
+        total_ll += marg_ll;
+    }
+    return total_ll;
+}
+
 }  // namespace
 
 HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const HybridOptions& options) {
@@ -228,8 +312,11 @@ HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const
 
     const bool use_ab = options.ab_handoff_trick >= 0 && deal.tricksPlayed() >= options.ab_handoff_trick;
     const bool use_race = options.race && !res.exact_enumeration && n_moves > 1;
+    const bool use_me = options.use_match_equity && options.bid_model != nullptr;
+    const bool use_auct = options.weight_auction && options.bid_model != nullptr && root_obs.bids_made >= 0;
     const int max_w = res.exact_enumeration ? int(enum_worlds.size()) : options.worlds;
     const int step_w = use_race ? std::max(8, options.race_step) : max_w;
+    std::unordered_map<std::uint64_t, double> auct_cache;
 
     // Track per-world unnormalized log-weights and per-move values so we can
     // compute exact normalized weighted means & paired-difference SEs on the fly.
@@ -252,19 +339,31 @@ HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const
                 if (!sw) sw = sampler.sampleUnchecked(rng);
                 w = *sw;
             }
-            const double lw = (options.weight_play_history && !root_obs.plays.empty() && max_w > 1)
-                                  ? playHistoryLogLik(root_obs, w, policy, options.play_lik_temp)
-                                  : 0.0;
+            double lw = 0.0;
+            if (options.weight_play_history && !root_obs.plays.empty() && max_w > 1) {
+                lw += playHistoryLogLik(root_obs, w, policy, options.play_lik_temp);
+            }
+            if (use_auct && max_w > 1) {
+                lw += auctionHistoryLogLik(root_obs, w, *options.bid_model, options.match_scores, options.match_pot,
+                                           options.auction_lik_temp, options.auction_splits, rng, auct_cache);
+            }
             logw.push_back(lw);
 
             const Deal base = sampler.replay(w);
             if (use_ab) {
-                const EndgameResult er = solveEndgame(base);
+                EndgameOptions eo;
+                if (use_me) {
+                    eo.objective = EndgameObjective::kMatchEquity;
+                    eo.bid_model = options.bid_model;
+                    eo.match_scores = options.match_scores;
+                    eo.match_pot = options.match_pot;
+                }
+                const EndgameResult er = solveEndgame(base, eo);
                 for (std::size_t i = 0; i < n_moves; ++i) {
                     double v = 0.0;
                     for (const auto& [c, ev] : er.move_values) {
                         if (c == moves[i]) {
-                            v = double(ev);
+                            v = use_me ? (0.5 + double(ev) / 20000.0) : double(ev);
                             break;
                         }
                     }
@@ -279,7 +378,14 @@ HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const
                     Deal sim = base;
                     sim.play(moves[i]);
                     while (sim.phase() == Phase::kPlay) sim.play(policy.chooseCard(sim));
-                    vals[i].push_back(unitMargin(sim, my_team));
+                    if (use_me) {
+                        const int us = options.match_scores[my_team];
+                        const int them = options.match_scores[1 - my_team];
+                        vals[i].push_back(options.bid_model->evalDealEquity(sim.result(), deal.config(), deal.dealer(),
+                                                                            my_team, us, them, options.match_pot));
+                    } else {
+                        vals[i].push_back(unitMargin(sim, my_team));
+                    }
                 }
             }
         }

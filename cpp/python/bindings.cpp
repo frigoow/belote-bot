@@ -481,8 +481,17 @@ PYBIND11_MODULE(belote_cpp, m) {
     py::class_<HybridOptions>(m, "HybridOptions")
         .def(py::init([](int worlds, int ab_handoff_trick, bool weight_play_history, double play_lik_temp, bool race,
                          int race_min_worlds, int race_step, double race_z, std::uint64_t seed) {
-                 return HybridOptions{worlds,     ab_handoff_trick, weight_play_history, play_lik_temp, race,
-                                      race_min_worlds, race_step,   race_z,              seed};
+                 HybridOptions o;
+                 o.worlds = worlds;
+                 o.ab_handoff_trick = ab_handoff_trick;
+                 o.weight_play_history = weight_play_history;
+                 o.play_lik_temp = play_lik_temp;
+                 o.race = race;
+                 o.race_min_worlds = race_min_worlds;
+                 o.race_step = race_step;
+                 o.race_z = race_z;
+                 o.seed = seed;
+                 return o;
              }),
              py::arg("worlds") = 64, py::arg("ab_handoff_trick") = 4, py::arg("weight_play_history") = true,
              py::arg("play_lik_temp") = 1.0, py::arg("race") = false, py::arg("race_min_worlds") = 24,
@@ -699,6 +708,178 @@ PYBIND11_MODULE(belote_cpp, m) {
             return out;
         },
         py::arg("deals"), py::arg("fast_policy") = nullptr, py::arg("threads") = 8);
+
+    // Multithreaded C++ Expert Iteration (ExIt) collector:
+    // Plays deals with hybridSearch(worlds, ab_handoff_trick) and records multi-action
+    // CRN search Q-targets + BeliefNet targets at every non-forced play decision.
+    m.def(
+        "collect_exit_dataset",
+        [](int num_deals, const Config& cfg, std::shared_ptr<const FastPolicyModel> fast_policy,
+           const BidModel* bid_model, int worlds, int ab_handoff_trick, double eps, std::uint64_t seed, int threads) {
+            if (!fast_policy) throw py::value_error("collect_exit_dataset requires fast_policy");
+            struct ExItRow {
+                std::vector<float> state;
+                std::vector<float> hist;
+                int n_plies = 0;
+                std::vector<float> legal_actions;
+                int n_legal = 0;
+                std::array<float, kMaxLegal> q_targets{};
+                std::array<std::int8_t, kCards> bt{};
+                std::array<std::uint8_t, kCards * 3> ba{};
+            };
+            const int n_threads = std::max(1, threads);
+            std::vector<std::vector<ExItRow>> local(static_cast<std::size_t>(n_threads));
+            std::atomic<int> next{0};
+
+            auto worker = [&](int t) {
+                auto& dst = local[static_cast<std::size_t>(t)];
+                dst.reserve(static_cast<std::size_t>((num_deals / n_threads + 4) * 20));
+                std::mt19937_64 rng(seed * 0x9E3779B97F4A7C15ull + std::uint64_t(t + 1) * 10007ull);
+                std::uniform_real_distribution<double> u01(0.0, 1.0);
+                std::uniform_real_distribution<double> uthr(4.4, 5.6);
+                std::array<int, kCards> deck;
+                std::iota(deck.begin(), deck.end(), 0);
+
+                for (int i; (i = next.fetch_add(1)) < num_deals;) {
+                    std::shuffle(deck.begin(), deck.end(), rng);
+                    Deal d(cfg, i % kPlayers, deck);
+                    const bool use_bm = (bid_model != nullptr) && (u01(rng) < 0.70);
+                    while (d.phase() == Phase::kBid1 || d.phase() == Phase::kBid2) {
+                        const Bid b = use_bm ? bid_model->chooseBid(d, 0, 0, 0) : ruleBid(d, uthr(rng));
+                        d.bid(b);
+                    }
+                    if (d.phase() != Phase::kPlay) continue;
+
+                    while (d.phase() == Phase::kPlay) {
+                        const int me = d.currentPlayer();
+                        if (d.canSetDeclare(me)) d.setDeclare(me, smartChooseDeclare(d));
+                        const Mask legal = d.legalMoves();
+                        const int nl = popcount(legal);
+                        if (nl <= 1) {
+                            d.play(lowestCard(legal));
+                            continue;
+                        }
+
+                        HybridOptions ho;
+                        ho.worlds = worlds;
+                        ho.ab_handoff_trick = ab_handoff_trick;
+                        ho.weight_play_history = true;
+                        ho.race = false;  // evaluate ALL legal moves accurately for Q-targets
+                        ho.seed = rng();
+                        if (ho.seed == 0) ho.seed = 1;
+                        const HybridResult hr = hybridSearch(d, *fast_policy, ho);
+
+                        const Observation obs = observe(d, me);
+                        ExItRow row;
+                        row.state.resize(kStateDim);
+                        encodeState(obs, row.state.data());
+                        row.hist.resize(kMaxPlies * kPlyDim, 0.0f);
+                        row.n_plies = encodeHistory(obs, row.hist.data());
+                        row.legal_actions.resize(kMaxLegal * kActionDim, 0.0f);
+                        row.n_legal = nl;
+
+                        int legal_cards[kMaxLegal];
+                        int k = 0;
+                        for (Mask m = legal; m; m &= m - 1) {
+                            const int c = lowestCard(m);
+                            legal_cards[k] = c;
+                            encodeAction(obs, c, row.legal_actions.data() + k * kActionDim);
+                            double mv = 0.0;
+                            for (const auto& [mc, val] : hr.move_values) {
+                                if (mc == c) {
+                                    mv = val;
+                                    break;
+                                }
+                            }
+                            row.q_targets[std::size_t(k)] = float(mv / 25.0);
+                            ++k;
+                        }
+
+                        // BeliefNet targets & hard-constraint allowed mask.
+                        const Constraints con = inferConstraints(obs);
+                        const Mask seen = obs.hand | obs.played();
+                        row.bt.fill(-1);
+                        row.ba.fill(0);
+                        for (int c = 0; c < kCards; ++c) {
+                            if (seen & bit(c)) continue;
+                            const int cc = canonCard(c, obs.trump);
+                            for (int p = 0; p < kPlayers; ++p) {
+                                if (p == me) continue;
+                                const int r = relSeat(p, me) - 1;
+                                const bool ok = (con.pinned[p] & bit(c)) != 0 ||
+                                                ((con.excluded[p] & bit(c)) == 0 &&
+                                                 ((con.pinned[0] | con.pinned[1] | con.pinned[2] | con.pinned[3]) &
+                                                  bit(c)) == 0);
+                                row.ba[std::size_t(cc * 3 + r)] = ok ? 1 : 0;
+                                if (d.hand(p) & bit(c)) row.bt[std::size_t(cc)] = std::int8_t(r);
+                            }
+                        }
+
+                        dst.push_back(std::move(row));
+                        int play_card = hr.best_move;
+                        if (eps > 0.0 && u01(rng) < eps) play_card = legal_cards[int(rng() % std::uint64_t(nl))];
+                        d.play(play_card);
+                    }
+                }
+            };
+
+            {
+                py::gil_scoped_release rel;
+                std::vector<std::thread> pool;
+                for (int t = 0; t < n_threads; ++t) pool.emplace_back(worker, t);
+                for (auto& th : pool) th.join();
+            }
+
+            std::size_t total = 0;
+            for (const auto& v : local) total += v.size();
+            const py::ssize_t N = static_cast<py::ssize_t>(total);
+            py::array_t<float> states(std::vector<py::ssize_t>{N, kStateDim});
+            py::array_t<float> hists(std::vector<py::ssize_t>{N, kMaxPlies, kPlyDim});
+            py::array_t<int> n_plies(N);
+            py::array_t<float> legal_actions(std::vector<py::ssize_t>{N, kMaxLegal, kActionDim});
+            py::array_t<int> n_legal(N);
+            py::array_t<float> q_targets(std::vector<py::ssize_t>{N, kMaxLegal});
+            py::array_t<std::int8_t> bt(std::vector<py::ssize_t>{N, kCards});
+            py::array_t<std::uint8_t> ba(std::vector<py::ssize_t>{N, kCards, 3});
+
+            float* sp = states.mutable_data();
+            float* hp = hists.mutable_data();
+            int* npp = n_plies.mutable_data();
+            float* lap = legal_actions.mutable_data();
+            int* nlp = n_legal.mutable_data();
+            float* qtp = q_targets.mutable_data();
+            std::int8_t* btp = bt.mutable_data();
+            std::uint8_t* bap = ba.mutable_data();
+
+            std::size_t idx = 0;
+            for (const auto& v : local) {
+                for (const ExItRow& r : v) {
+                    std::memcpy(sp + idx * kStateDim, r.state.data(), kStateDim * sizeof(float));
+                    std::memcpy(hp + idx * kMaxPlies * kPlyDim, r.hist.data(), kMaxPlies * kPlyDim * sizeof(float));
+                    npp[idx] = r.n_plies;
+                    std::memcpy(lap + idx * kMaxLegal * kActionDim, r.legal_actions.data(),
+                                kMaxLegal * kActionDim * sizeof(float));
+                    nlp[idx] = r.n_legal;
+                    std::memcpy(qtp + idx * kMaxLegal, r.q_targets.data(), kMaxLegal * sizeof(float));
+                    std::memcpy(btp + idx * kCards, r.bt.data(), kCards * sizeof(std::int8_t));
+                    std::memcpy(bap + idx * kCards * 3, r.ba.data(), kCards * 3 * sizeof(std::uint8_t));
+                    ++idx;
+                }
+            }
+            py::dict out;
+            out["state"] = states;
+            out["history"] = hists;
+            out["n_plies"] = n_plies;
+            out["legal_actions"] = legal_actions;
+            out["n_legal"] = n_legal;
+            out["q_targets"] = q_targets;
+            out["belief_targets"] = bt;
+            out["belief_allowed"] = ba;
+            return out;
+        },
+        py::arg("num_deals"), py::arg("config") = Config::belgian(), py::arg("fast_policy") = nullptr,
+        py::arg("bid_model") = nullptr, py::arg("worlds") = 48, py::arg("ab_handoff_trick") = 4, py::arg("eps") = 0.03,
+        py::arg("seed") = 1, py::arg("threads") = 12);
 
     // ------------------------------------------------------------ agents / harness
     py::class_<Agent>(m, "Agent")

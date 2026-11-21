@@ -10,20 +10,27 @@
 
 #include "belote/deal.h"
 
+#include <array>
 #include <cstdint>
 #include <utility>
 #include <vector>
 
 namespace belote {
 
+class BidModel;
+
 enum class EndgameObjective {
-    kUnits,  // recorded unit margin from recordDeal() (held-over excluded)
-    kRaw,    // raw credited point margin
+    kUnits,        // recorded unit margin from recordDeal() (held-over excluded)
+    kRaw,          // raw credited point margin
+    kMatchEquity,  // exact scaled match equity: round(10000 * (2*V_team0 - 1))
 };
 
 struct EndgameOptions {
     EndgameObjective objective = EndgameObjective::kUnits;
     int tt_log2 = 18;  // 2^18 entries (~4 MB)
+    const BidModel* bid_model = nullptr;
+    std::array<int, 2> match_scores = {0, 0};
+    int match_pot = 0;
 };
 
 struct EndgameResult {

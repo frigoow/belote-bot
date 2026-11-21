@@ -312,7 +312,12 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
             else if (parts[i] == "noab") o.ab_handoff_trick = -1;
             else if (parts[i] == "nowt") o.weight_play_history = false;
             else if (parts[i] == "race") o.race = true;
-            else if (parts[i].rfind("z", 0) == 0) {
+            else if (parts[i] == "me") o.use_match_equity = true;
+            else if (parts[i] == "auct") o.weight_auction = true;
+            else if (parts[i].rfind("at", 0) == 0) {
+                o.weight_auction = true;
+                o.auction_lik_temp = std::stod(parts[i].substr(2));
+            } else if (parts[i].rfind("z", 0) == 0) {
                 o.race = true;
                 o.race_z = std::stod(parts[i].substr(1));
             } else if (parts[i].rfind("t", 0) == 0) {

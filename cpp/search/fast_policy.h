@@ -17,6 +17,8 @@
 
 namespace belote {
 
+class BidModel;
+
 class FastPolicyModel {
 public:
     static std::shared_ptr<const FastPolicyModel> load(const std::string& path);
@@ -59,6 +61,14 @@ struct HybridOptions {
     int race_step = 16;              // evaluate this many worlds per racing round
     double race_z = 2.5;             // prune move if leader beats it by > race_z * SE
     std::uint64_t seed = 0;
+    // M4 optional match-equity leaf evaluation & auction-history likelihood weighting.
+    const BidModel* bid_model = nullptr;
+    bool use_match_equity = false;
+    bool weight_auction = false;
+    double auction_lik_temp = 0.04;
+    int auction_splits = 4;          // 5/3-split Monte Carlo subsets per seat
+    std::array<int, 2> match_scores = {0, 0};
+    int match_pot = 0;
 };
 
 struct HybridResult {
