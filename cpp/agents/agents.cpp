@@ -64,6 +64,15 @@ bool smartChooseDeclare(const Deal& d) {
     const int me = d.currentPlayer();
     if (!d.canSetDeclare(me) || d.toons(me).empty()) return true;
 
+    // On a ronde (all 8 tricks), the ronde team's announced toons still count
+    // even when beaten in the trick-1 comparison. Keep announcing when our team
+    // is the taker with plausible ronde strength.
+    if (teamOf(me) == d.takers()) {
+        const Mask h = d.hand(me);
+        const int n_trumps = popcount(h & suitMask(d.trump()));
+        if (n_trumps >= 4 || ruleHandValue(h, d.trump()) >= 7.5) return true;
+    }
+
     const Trick& t = d.trick();
     bool partner_played = false;
     const int partner = partnerOf(me);

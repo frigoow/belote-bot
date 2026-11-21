@@ -212,20 +212,20 @@ def main() -> None:
                 )
         print(msg, flush=True)
 
-    # Load best ExIt Q-GRU & gate against ISMCTS-1000!
+    # Load best ExIt Q-GRU & gate against ISMCTS-1000 on a held-out seed (54321 != 12345)!
     best = torch.load(args.save, map_location=device, weights_only=True)
     q_model.load_state_dict(best["q_state_dict"])
     belief_net.load_state_dict(best["belief_state_dict"])
 
-    ev_m1000 = eval_vs_cpp_agent(q_model, "ismcts:1000", decks=400, device=device)
-    bev_self = eval_belief_per_trick(belief_net, device, num_deals=256, policy_model=q_model)
-    bev_rule = eval_belief_per_trick(belief_net, device, num_deals=256)
+    ev_m1000 = eval_vs_cpp_agent(q_model, "ismcts:1000", decks=400, seed=54321, device=device)
+    bev_self = eval_belief_per_trick(belief_net, device, num_deals=128, seed=54321, policy_model=q_model)
+    bev_rule = eval_belief_per_trick(belief_net, device, num_deals=128, seed=54321)
     print(
-        f"\n=== ExIt Q-GRU GATE (400 decks) ===\n"
+        f"\n=== ExIt Q-GRU GATE (400 decks, held-out seed 54321) ===\n"
         f"  Pure Q-GRU vs ismcts:1000: {ev_m1000['units']:+.2f}±{ev_m1000['units_ci95']:.2f}u "
         f"({ev_m1000['raw']:+.1f}±{ev_m1000['raw_ci95']:.1f} raw pts)\n"
-        f"  B_phi CE (self-play): {bev_self['model_loss']:.4f} vs unif={bev_self['uniform_loss']:.4f}\n"
-        f"  B_phi CE (rule):      {bev_rule['model_loss']:.4f} vs unif={bev_rule['uniform_loss']:.4f}",
+        f"  B_phi CE (self-play): {bev_self['model_loss']:.4f} vs WorldSampler={bev_self['sampler_loss']:.4f}\n"
+        f"  B_phi CE (rule):      {bev_rule['model_loss']:.4f} vs WorldSampler={bev_rule['sampler_loss']:.4f}",
         flush=True,
     )
 

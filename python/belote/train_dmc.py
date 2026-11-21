@@ -431,11 +431,11 @@ def main() -> None:
                 f"vs rollout:32: {ev_roll['units']:+.2f}±{ev_roll['units_ci95']:.2f}u"
             )
             if belief_net is not None:
-                bev_self = eval_belief_per_trick(belief_net, device, num_deals=128, policy_model=q_model)
-                bev_rule = eval_belief_per_trick(belief_net, device, num_deals=128)
+                bev_self = eval_belief_per_trick(belief_net, device, num_deals=64, policy_model=q_model)
+                bev_rule = eval_belief_per_trick(belief_net, device, num_deals=64)
                 msg += (
-                    f" | B_phi self={bev_self['model_loss']:.4f}/{bev_self['uniform_loss']:.4f}"
-                    f" rule={bev_rule['model_loss']:.4f}/{bev_rule['uniform_loss']:.4f}"
+                    f" | B_phi self={bev_self['model_loss']:.4f}/samp={bev_self['sampler_loss']:.4f}"
+                    f" rule={bev_rule['model_loss']:.4f}/samp={bev_rule['sampler_loss']:.4f}"
                 )
             print(msg, flush=True)
 
@@ -458,22 +458,24 @@ def main() -> None:
 
     best_ckpt = torch.load(args.save, map_location=device, weights_only=True)
     q_model.load_state_dict(best_ckpt["q_state_dict"])
-    ev_mcts1000 = eval_vs_cpp_agent(q_model, "ismcts:1000", decks=250, device=device)
+    # Held-out seed (54321 != selection seed 12345) for unbiased final gate reporting.
+    ev_mcts1000 = eval_vs_cpp_agent(q_model, "ismcts:1000", decks=250, seed=54321, device=device)
     print(
-        f"\nBest Dueling {args.arch.upper()} (ep={best_ckpt['episodes']:,}) vs ismcts:1000: "
+        f"\nBest Dueling {args.arch.upper()} (ep={best_ckpt['episodes']:,}) vs ismcts:1000 (held-out seed 54321): "
         f"{ev_mcts1000['units']:+.2f}±{ev_mcts1000['units_ci95']:.2f}u "
         f"({ev_mcts1000['raw']:+.1f}±{ev_mcts1000['raw_ci95']:.1f} raw pts)",
         flush=True,
     )
     if belief_net is not None and "belief_state_dict" in best_ckpt:
         belief_net.load_state_dict(best_ckpt["belief_state_dict"])
-        bev = eval_belief_per_trick(belief_net, device, num_deals=256)
+        bev = eval_belief_per_trick(belief_net, device, num_deals=200, seed=54321)
         print(
-            f"B_phi overall CE={bev['model_loss']:.4f} vs constrained-uniform={bev['uniform_loss']:.4f}",
+            f"B_phi overall CE={bev['model_loss']:.4f} vs WorldSampler={bev['sampler_loss']:.4f} "
+            f"(naive_unif={bev['uniform_loss']:.4f})",
             flush=True,
         )
-        for t, (ml, ul) in bev["per_trick"].items():
-            print(f"  trick {t + 1}: B_phi={ml:.4f} vs unif={ul:.4f} (delta={ml - ul:+.4f})", flush=True)
+        for t, (ml, sl, ul) in bev["per_trick"].items():
+            print(f"  trick {t + 1}: B_phi={ml:.4f} vs sampler={sl:.4f} (delta={ml - sl:+.4f}, naive={ul:.4f})", flush=True)
 
     if args.distill_fast:
         fast_bin = args.save.with_suffix(".fast.bin")

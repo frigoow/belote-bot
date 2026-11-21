@@ -182,9 +182,13 @@ def eval_belief_per_trick(
     num_deals: int = 256,
     seed: int = 99999,
     policy_model: torch.nn.Module | None = None,
+    sampler_worlds: int = 256,
 ) -> dict[str, object]:
-    """Compare BeliefNet per-trick cross-entropy log-loss vs constrained-uniform.
+    """Compare BeliefNet per-trick cross-entropy log-loss vs exact WorldSampler marginals.
 
+    Evaluates against the real uniform-over-consistent-worlds baseline (`sampler_loss`,
+    respecting exact hand sizes and all hard constraints via C++ WorldSampler) as well
+    as the naive per-card `1 / n_allowed` baseline (`uniform_loss`) for reference.
     When `policy_model` is provided, steps validation deals with `policy_model`
     (measuring in-distribution self-play belief accuracy); otherwise uses RuleAgent.
     """
@@ -194,6 +198,7 @@ def eval_belief_per_trick(
     env = bc.BatchPlayEnv(num_envs=num_deals, config=bc.Config.belgian(), seed=seed, bid_jitter=0.0)
 
     model_loss_by_trick = np.zeros(8, dtype=np.float64)
+    sampler_loss_by_trick = np.zeros(8, dtype=np.float64)
     unif_loss_by_trick = np.zeros(8, dtype=np.float64)
     count_by_trick = np.zeros(8, dtype=np.int64)
     idx_range = torch.arange(bc.MAX_LEGAL, device=device).unsqueeze(0)
@@ -211,18 +216,33 @@ def eval_belief_per_trick(
         logits = belief_net(s_t, h_t, np_t, al_t)  # (B, 32, 3)
         log_probs = F.log_softmax(logits, dim=-1).cpu().numpy()
 
-        mask = bt >= 0
-        if np.any(mask):
-            rows, cols = np.nonzero(mask)
-            targets = bt[rows, cols]
-            n_allowed = ba[rows, cols].sum(axis=-1).astype(np.float64)
-            # Only evaluate cards with >1 allowed seat (pinned cards have 0 entropy for both).
+        # Real WorldSampler uniform-over-consistent-worlds marginals for each deal.
+        for b in range(num_deals):
+            bt_b = bt[b]
+            ba_b = ba[b]
+            mask_b = bt_b >= 0
+            if not np.any(mask_b):
+                continue
+            cols = np.nonzero(mask_b)[0]
+            n_allowed = ba_b[cols].sum(axis=-1).astype(np.float64)
             amb = n_allowed > 1
-            if np.any(amb):
-                rows_a, cols_a, tgt_a = rows[amb], cols[amb], targets[amb]
-                model_loss_by_trick[trick] += float(-log_probs[rows_a, cols_a, tgt_a].sum())
-                unif_loss_by_trick[trick] += float(np.log(n_allowed[amb]).sum())
-                count_by_trick[trick] += int(amb.sum())
+            if not np.any(amb):
+                continue
+            cols_a = cols[amb]
+            tgt_a = bt_b[cols_a]
+            d = env.deal(b)
+            obs = bc.observe(d, d.current_player)
+            sm = bc.sampler_marginals(obs, max_worlds=sampler_worlds, seed=seed * 10007 + ply * 997 + b + 1)
+            # Mild Laplace smoothing (0.5 / W) prevents -inf log when finite sampling misses a rare seat.
+            eps_s = 0.5 / float(max(1, sampler_worlds))
+            sm_smooth = sm[cols_a] + eps_s * ba_b[cols_a]
+            sm_smooth /= np.maximum(1e-12, sm_smooth.sum(axis=-1, keepdims=True))
+            p_true = sm_smooth[np.arange(len(cols_a)), tgt_a]
+
+            model_loss_by_trick[trick] += float(-log_probs[b, cols_a, tgt_a].sum())
+            sampler_loss_by_trick[trick] += float(-np.log(np.maximum(1e-12, p_true)).sum())
+            unif_loss_by_trick[trick] += float(np.log(n_allowed[amb]).sum())
+            count_by_trick[trick] += int(len(cols_a))
 
         if policy_model is not None:
             la_t = torch.from_numpy(batch["legal_actions"]).to(device)
@@ -246,11 +266,13 @@ def eval_belief_per_trick(
         if count_by_trick[t] > 0:
             per_trick[t] = (
                 model_loss_by_trick[t] / count_by_trick[t],
+                sampler_loss_by_trick[t] / count_by_trick[t],
                 unif_loss_by_trick[t] / count_by_trick[t],
             )
     tot = count_by_trick.sum()
     return {
         "model_loss": float(model_loss_by_trick.sum() / max(1, tot)),
+        "sampler_loss": float(sampler_loss_by_trick.sum() / max(1, tot)),
         "uniform_loss": float(unif_loss_by_trick.sum() / max(1, tot)),
         "per_trick": per_trick,
     }

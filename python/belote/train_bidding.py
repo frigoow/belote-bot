@@ -368,11 +368,15 @@ def collect_sweep_batched(
                     else:
                         chosen_ci = best_ci
                 elif node_k == exp_node[j]:
-                    # Single-seat exploratory deviation: try the opposite of greedy
-                    # (or best candidate take) while all downstream seats play greedily.
+                    # Single-seat exploratory deviation: try opposite of greedy, or in R2
+                    # occasionally explore an alternative candidate suit so BidNet compares suits.
                     had_explore[j] = True
                     greedy_take = float(preds_j[best_ci, 1]) > float(preds_j[best_ci, 0])
-                    if greedy_take:
+                    if len(cands) > 1 and rng.random() < 0.25:
+                        alt = [ci for ci in range(len(cands)) if ci != best_ci]
+                        chosen_ci = alt[int(rng.integers(0, len(alt)))]
+                        chosen = cands[chosen_ci]
+                    elif greedy_take:
                         chosen = bc.Bid.pass_()
                         chosen_ci = best_ci
                     else:

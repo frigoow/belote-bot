@@ -74,6 +74,7 @@ def test_choose_cards_and_fast_policy_export(tmp_path):
     assert hr1.best_move == hr2.best_move
     assert hr1.worlds_used == hr2.worlds_used
 
-    bev = eval_belief_per_trick(BeliefNet(), device, num_deals=8, seed=3)
+    bev = eval_belief_per_trick(BeliefNet(), device, num_deals=4, seed=3, sampler_worlds=32)
+    assert bev["sampler_loss"] > 0.0
     assert bev["uniform_loss"] > 0.0
     assert bev["model_loss"] > 0.0

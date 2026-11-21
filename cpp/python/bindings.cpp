@@ -271,6 +271,48 @@ PYBIND11_MODULE(belote_cpp, m) {
         .def_readonly("excluded", &Constraints::excluded)
         .def_readonly("pinned", &Constraints::pinned);
     m.def("infer_constraints", &inferConstraints, py::arg("observation"));
+    m.def(
+        "sampler_marginals",
+        [](const Observation& obs, int max_worlds, std::uint64_t seed) {
+            // Exact uniform-over-consistent-worlds marginal P(canon_card -> rel_seat in {1,2,3})
+            // using WorldSampler: exact enumeration when count <= max_worlds, else uniform sampling.
+            WorldSampler sampler(obs);
+            const int me = obs.observer;
+            const int trump = obs.trump;
+            py::array_t<double> out(std::vector<py::ssize_t>{kCards, 3});
+            double* p_out = out.mutable_data();
+            std::fill(p_out, p_out + kCards * 3, 0.0);
+
+            std::vector<World> worlds;
+            {
+                py::gil_scoped_release rel;
+                if (sampler.count() > 0 && sampler.count() <= std::uint64_t(max_worlds)) {
+                    worlds = sampler.enumerate(std::uint64_t(max_worlds));
+                }
+                if (worlds.empty()) {
+                    std::mt19937_64 rng(seed ? seed : 0x5A17C0DE12345678ull);
+                    worlds.reserve(static_cast<std::size_t>(max_worlds));
+                    for (int i = 0; i < max_worlds; ++i) {
+                        auto sw = sampler.sample(rng, 500);
+                        if (!sw) sw = sampler.sampleUnchecked(rng);
+                        worlds.push_back(*sw);
+                    }
+                }
+            }
+            const double inv_n = worlds.empty() ? 0.0 : (1.0 / double(worlds.size()));
+            for (const World& w : worlds) {
+                for (int p = 0; p < kPlayers; ++p) {
+                    if (p == me) continue;
+                    const int r = relSeat(p, me) - 1;
+                    for (Mask m = w.hands[p]; m; m &= m - 1) {
+                        const int cc = canonCard(lowestCard(m), trump);
+                        p_out[cc * 3 + r] += inv_n;
+                    }
+                }
+            }
+            return out;
+        },
+        py::arg("observation"), py::arg("max_worlds") = 256, py::arg("seed") = 1);
 
     // ------------------------------------------------------------ encoder
     m.attr("ENCODER_VERSION") = kEncoderVersion;

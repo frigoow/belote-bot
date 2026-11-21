@@ -52,7 +52,7 @@ Baseline ladder (`Config::belgian()`, rule bidder for every seat, A's margin per
 | ISMCTS-1000 vs rule | 911 | +2.64 ± 0.30 | +26.3 ± 3.1 | 3.9 |
 | ISMCTS-1000 vs ISMCTS-100 | 911 | +1.39 ± 0.29 | +14.0 ± 3.0 | 4.0 |
 | ISMCTS-5000 vs ISMCTS-1000 | 911 | +0.31 ± 0.17 | +3.1 ± 1.8 | 17.4 |
-| rollout:32 vs rule | 3,604 | +2.60 ± 0.15 | +25.8 ± 1.5 | 0.19 |
+| rollout:32 vs rule | 9,032 | +2.55 ± 0.09 | +25.2 ± 0.9 | 0.16 |
 | rollout:32:ab4 vs rollout:32 | 2,246 | +0.40 ± 0.17 | +4.0 ± 1.8 | 0.51 |
 | rollout:32 vs ISMCTS-1000 | 1,797 | −0.24 ± 0.19 | −2.4 ± 2.0 | 0.19 |
 | rollout:32:ab4 vs ISMCTS-1000 | 1,797 | +0.10 ± 0.20 | +0.9 ± 2.0 | 0.56 |
@@ -60,9 +60,12 @@ Baseline ladder (`Config::belgian()`, rule bidder for every seat, A's margin per
 | hybrid:64:ab4 vs ISMCTS-1000 | 911 | **+0.48 ± 0.29** | **+4.6 ± 3.0** | 12.6 |
 | hybrid:64:ab4 vs ISMCTS-5000 | 450 | −0.05 ± 0.41 | −0.4 ± 4.1 | 12.4 |
 | fast (ExIt1) vs fast (1.8M) | 1,797 | +0.30 ± 0.19 | +2.9 ± 1.9 | <0.01 |
+| hybrid (ExIt1):192:ab4:rab5:race:z2.0 vs pure Q-GRU (ExIt1) | 400 | **+1.92 ± 0.48** | — | 17.5 |
 | hybrid (ExIt1):192:ab4:rab5:race:z2.0 vs ISMCTS-5000 | 911 | **+0.72 ± 0.26** | **+7.1 ± 2.7** | 16.2 |
 | hybrid (ExIt1):256:ab4:rab5:race:z2.0 vs ruleplay:128:ab4 | 898 | **+0.29 ± 0.25** | **+2.8 ± 2.6** | 20.6 |
 | hybrid (ExIt1):256:ab4:rab5:race:z2.0:hauct vs ISMCTS-5000 | 911 | **+1.04 ± 0.28** | **+10.3 ± 2.8** | 24.8 |
+
+*(Neural checkpoints in `checkpoints/` are gitignored and local; reproduce via `python -m belote.train_dmc`, `python -m belote.train_exit`, and `python -m belote.train_bidding`.)*
 
 Full 101-point matches (`--mode match`, mirrored pairs, `Config::belgian()`):
 - `rollout:32:ab4` vs `rule` (200 pairs, fixed rule bidder): **75.25% ± 3.47 pp** (+24.5 ± 2.1 units/match).

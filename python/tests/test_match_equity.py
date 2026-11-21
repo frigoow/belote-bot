@@ -84,3 +84,40 @@ def test_match_equity_matches_monte_carlo_belgian_and_wikibooks():
                 f"margin={margin} state={(us, them, pot, wd)}: dp={dp_val:.5f} vs mc={mc_val:.5f} (se={se:.5f})"
             )
             assert max_pot < 64
+
+
+def test_match_equity_matches_real_cpp_match_engine():
+    """Verify solve_match_equity directly against real C++ bc.Match + bc.Deal simulations."""
+    cfg = bc.Config.belgian()
+    dist = estimate_outcome_dist(num_deals=8000, bidder="rule", player="rule", config=cfg, seed=7)
+    table = solve_match_equity(dist, target=cfg.match_target, margin=cfg.match_win_margin, pot_cap=64)
+
+    # Run real C++ bc.Match matches with RuleAgent and compare win rates at (0,0,0) and mid-match.
+    rng = np.random.default_rng(77)
+    n_matches = 600
+    wins_wd = [0, 0]
+    tot_wd = [0, 0]
+    for i in range(n_matches):
+        first_dealer = i % 4
+        m = bc.Match(cfg, first_dealer)
+        wd0 = 1 if (first_dealer & 1) == 0 else 0
+        steps = 0
+        while not m.finished and steps < 400:
+            deck = rng.permutation(32).tolist()
+            d = bc.Deal(cfg, m.dealer, deck)
+            while d.phase in (bc.Phase.BID1, bc.Phase.BID2):
+                d.bid(bc.rule_bid(d))
+            while d.phase == bc.Phase.PLAY:
+                d.play(bc.rule_choose_card(d))
+            m.record(d.result)
+            steps += 1
+        assert m.finished
+        tot_wd[wd0] += 1
+        if m.winner == 0:
+            wins_wd[wd0] += 1
+
+    for wd in (0, 1):
+        emp = wins_wd[wd] / tot_wd[wd]
+        dp_v = table.lookup(0, 0, 0, wd)
+        se = np.sqrt(dp_v * (1.0 - dp_v) / tot_wd[wd])
+        assert abs(emp - dp_v) < 4.0 * se, f"we_deal={wd}: real bc.Match={emp:.4f} vs DP={dp_v:.4f} (se={se:.4f})"
