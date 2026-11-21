@@ -17,6 +17,7 @@
 #include "belote/sampler.h"
 #include "belote/toon.h"
 #include "search/endgame.h"
+#include "search/fast_policy.h"
 #include "search/ismcts.h"
 #include "search/rollout.h"
 
@@ -454,6 +455,39 @@ PYBIND11_MODULE(belote_cpp, m) {
         .def_readonly("move_values", &RolloutResult::move_values);
     m.def("rollout_search", &rolloutSearch, py::arg("deal"), py::arg("options") = RolloutOptions{},
           py::call_guard<py::gil_scoped_release>());
+
+    py::class_<FastPolicyModel, std::shared_ptr<FastPolicyModel>>(m, "FastPolicyModel")
+        .def_static("load", [](const std::string& path) {
+            return std::const_pointer_cast<FastPolicyModel>(FastPolicyModel::load(path));
+        })
+        .def(
+            "eval_observation",
+            [](const FastPolicyModel& model, const Observation& obs) {
+                py::array_t<float> out(kCards);
+                model.evalObservation(obs, out.mutable_data());
+                return out;
+            },
+            py::arg("observation"))
+        .def("choose_card", &FastPolicyModel::chooseCard, py::arg("deal"));
+
+    py::class_<HybridOptions>(m, "HybridOptions")
+        .def(py::init([](int worlds, int ab_handoff_trick, bool weight_play_history, std::uint64_t seed) {
+                 return HybridOptions{worlds, ab_handoff_trick, weight_play_history, seed};
+             }),
+             py::arg("worlds") = 64, py::arg("ab_handoff_trick") = 4, py::arg("weight_play_history") = true,
+             py::arg("seed") = 0)
+        .def_readwrite("worlds", &HybridOptions::worlds)
+        .def_readwrite("ab_handoff_trick", &HybridOptions::ab_handoff_trick)
+        .def_readwrite("weight_play_history", &HybridOptions::weight_play_history)
+        .def_readwrite("seed", &HybridOptions::seed);
+    py::class_<HybridResult>(m, "HybridResult")
+        .def_readonly("best_move", &HybridResult::best_move)
+        .def_readonly("value", &HybridResult::value)
+        .def_readonly("worlds_used", &HybridResult::worlds_used)
+        .def_readonly("exact_enumeration", &HybridResult::exact_enumeration)
+        .def_readonly("move_values", &HybridResult::move_values);
+    m.def("hybrid_search", &hybridSearch, py::arg("deal"), py::arg("policy"),
+          py::arg("options") = HybridOptions{}, py::call_guard<py::gil_scoped_release>());
 
     // ------------------------------------------------------------ agents / harness
     py::class_<Agent>(m, "Agent")

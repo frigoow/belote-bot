@@ -45,6 +45,7 @@ target_compile_options(belote_core PRIVATE ${BELOTE_WARNINGS})
 add_library(belote_search STATIC
     search/belote_game.cpp
     search/endgame.cpp
+    search/fast_policy.cpp
     search/ismcts.cpp
     search/rollout.cpp
     agents/agents.cpp

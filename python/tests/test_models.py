@@ -43,6 +43,7 @@ def test_choose_cards_and_fast_policy_export(tmp_path):
             assert c in d.legal_cards()
 
     fast = FastPolicy()
+    fast.eval()
     out = tmp_path / "fast.bin"
     fast.export_bin(out)
     raw = out.read_bytes()
@@ -51,6 +52,19 @@ def test_choose_cards_and_fast_policy_export(tmp_path):
     assert dims == (bc.STATE_DIM, 256, 128, 32)
     expected_floats = bc.STATE_DIM * 256 + 256 + 256 * 128 + 128 + 128 * 32 + 32
     assert len(raw) == 20 + 4 * expected_floats
+
+    # Golden parity: C++ FastPolicyModel matches PyTorch FastPolicy logits to <1e-5.
+    cpp_fast = bc.FastPolicyModel.load(str(out))
+    for d in deals:
+        obs = bc.observe(d, d.current_player)
+        cpp_logits = cpp_fast.eval_observation(obs)
+        with torch.no_grad():
+            py_logits = fast(torch.from_numpy(bc.encode_state(obs)).unsqueeze(0)).squeeze(0).numpy()
+        np.testing.assert_allclose(cpp_logits, py_logits, atol=1e-5, rtol=1e-5)
+        assert cpp_fast.choose_card(d) in d.legal_cards()
+
+    hr = bc.hybrid_search(deals[0], cpp_fast, bc.HybridOptions(worlds=8, ab_handoff_trick=5, seed=1))
+    assert hr.best_move in deals[0].legal_cards()
 
     bev = eval_belief_per_trick(BeliefNet(), device, num_deals=8, seed=3)
     assert bev["uniform_loss"] > 0.0

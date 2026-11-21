@@ -8,6 +8,7 @@
 // below read only their own hand and public state.
 
 #include "belote/deal.h"
+#include "search/fast_policy.h"
 #include "search/ismcts.h"
 #include "search/rollout.h"
 
@@ -89,8 +90,38 @@ private:
     RolloutOptions options_;
 };
 
+// Direct greedy FastPolicy card play; bids with the rule bidder.
+class FastPolicyAgent : public Agent {
+public:
+    FastPolicyAgent(std::shared_ptr<const FastPolicyModel> model, std::string label)
+        : model_(std::move(model)), name_(std::move(label)) {}
+    std::string name() const override { return name_; }
+    Bid chooseBid(const Deal& d) override { return ruleBid(d); }
+    int chooseCard(const Deal& d) override { return model_->chooseCard(d); }
+
+private:
+    std::shared_ptr<const FastPolicyModel> model_;
+    std::string name_;
+};
+
+// FastPolicy + WorldSampler + play-history weighting + exact AB endgame hybrid.
+class HybridAgent : public Agent {
+public:
+    HybridAgent(std::shared_ptr<const FastPolicyModel> model, HybridOptions options, std::string label)
+        : model_(std::move(model)), options_(options), name_(std::move(label)) {}
+    std::string name() const override { return name_; }
+    Bid chooseBid(const Deal& d) override { return ruleBid(d); }
+    int chooseCard(const Deal& d) override { return hybridSearch(d, *model_, options_).best_move; }
+
+private:
+    std::shared_ptr<const FastPolicyModel> model_;
+    HybridOptions options_;
+    std::string name_;
+};
+
 // "random", "rule", "ismcts:<iterations>[:<threads>]",
-// "rollout:<worlds>[:ab<trick>]".
+// "rollout:<worlds>[:ab<trick>]", "fast:<weights.bin>",
+// "hybrid:<weights.bin>:<worlds>[:ab<trick>][:nowt]".
 std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed);
 
 }  // namespace belote

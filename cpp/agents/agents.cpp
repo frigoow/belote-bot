@@ -1,6 +1,8 @@
 #include "agents/agent.h"
 
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace belote {
 
@@ -187,6 +189,44 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
             else throw std::invalid_argument("unknown rollout option: " + tail);
         }
         return std::make_unique<RolloutAgent>(o);
+    }
+    auto loadCached = [](const std::string& path) -> std::shared_ptr<const FastPolicyModel> {
+        static std::mutex mu;
+        static std::unordered_map<std::string, std::shared_ptr<const FastPolicyModel>> cache;
+        std::lock_guard<std::mutex> lock(mu);
+        auto it = cache.find(path);
+        if (it != cache.end()) return it->second;
+        auto m = FastPolicyModel::load(path);
+        cache.emplace(path, m);
+        return m;
+    };
+    if (spec.rfind("fast:", 0) == 0) {
+        const std::string path = spec.substr(5);
+        return std::make_unique<FastPolicyAgent>(loadCached(path), spec);
+    }
+    if (spec.rfind("hybrid:", 0) == 0) {
+        // hybrid:<path>:<worlds>[:ab<trick>][:nowt]
+        std::vector<std::string> parts;
+        std::size_t start = 7;
+        while (start <= spec.size()) {
+            const auto pos = spec.find(':', start);
+            if (pos == std::string::npos) {
+                parts.push_back(spec.substr(start));
+                break;
+            }
+            parts.push_back(spec.substr(start, pos - start));
+            start = pos + 1;
+        }
+        if (parts.size() < 2) throw std::invalid_argument("hybrid spec needs hybrid:<path>:<worlds>");
+        HybridOptions o;
+        o.worlds = std::stoi(parts[1]);
+        for (std::size_t i = 2; i < parts.size(); ++i) {
+            if (parts[i].rfind("ab", 0) == 0) o.ab_handoff_trick = std::stoi(parts[i].substr(2));
+            else if (parts[i] == "noab") o.ab_handoff_trick = -1;
+            else if (parts[i] == "nowt") o.weight_play_history = false;
+            else throw std::invalid_argument("unknown hybrid option: " + parts[i]);
+        }
+        return std::make_unique<HybridAgent>(loadCached(parts[0]), o, spec);
     }
     throw std::invalid_argument("unknown agent: " + spec);
 }
