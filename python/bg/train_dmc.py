@@ -660,14 +660,8 @@ def main() -> None:
                 q_model.export_bin(args.export_dir / "bg_q_gru.bin")
                 print(f"  >>> New best Q-GRU ({best_vs_policy:+.3f})! Saved {best_path} & exported bg_q_gru.bin.", flush=True)
 
-    # Load best checkpoint for final export + FastPolicy distillation.
-    best_path = args.save.with_name(args.save.stem + "_best.pt")
-    if best_path.exists():
-        best_ckpt = torch.load(best_path, map_location=device, weights_only=False)
-        q_model.load_state_dict(best_ckpt["q_model"])
-        if b_model is not None and "b_model" in best_ckpt:
-            b_model.load_state_dict(best_ckpt["b_model"])
-
+    # Always export + distill from the latest (fully annealed) checkpoint to avoid
+    # noisy-eval selection bias (winner's curse from picking _best.pt on 1 seed).
     q_model.export_bin(args.export_dir / "bg_q_gru.bin")
     if b_model is not None:
         b_model.export_bin(args.export_dir / "bg_belief.bin")
