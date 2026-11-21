@@ -267,13 +267,13 @@ def main() -> None:
     ap.add_argument("--episodes", type=int, default=5_000_000)
     ap.add_argument("--envs", type=int, default=2048)
     ap.add_argument("--env-threads", type=int, default=12)
-    ap.add_argument("--batch-size", type=int, default=2048)
+    ap.add_argument("--batch-size", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=5e-4)
-    ap.add_argument("--min-lr", type=float, default=5e-5)
+    ap.add_argument("--min-lr", type=float, default=3e-5)
     ap.add_argument("--eps-start", type=float, default=0.08)
-    ap.add_argument("--eps-end", type=float, default=0.015)
-    ap.add_argument("--bid-noise", type=float, default=0.08)
-    ap.add_argument("--aux-own-coef", type=float, default=0.05)
+    ap.add_argument("--eps-end", type=float, default=0.01)
+    ap.add_argument("--bid-noise", type=float, default=0.0)
+    ap.add_argument("--aux-own-coef", type=float, default=0.02)
     ap.add_argument("--train-belief", action="store_true")
     ap.add_argument("--belief-every", type=int, default=4)
     ap.add_argument("--distill-fast", action="store_true")
@@ -333,6 +333,7 @@ def main() -> None:
 
     episodes_done = 0
     best_vs_policy = -1e9
+    best_belief_ce = 1e9
     start_round = 0
 
     if args.resume is not None and args.resume.exists():
@@ -350,8 +351,13 @@ def main() -> None:
                 b_sched.load_state_dict(ckpt["b_sched"])
         episodes_done = int(ckpt.get("episodes_done", 0))
         best_vs_policy = float(ckpt.get("best_vs_policy", -1e9))
+        best_belief_ce = float(ckpt.get("best_belief_ce", 1e9))
         start_round = episodes_done // args.envs
-        print(f"Resumed {args.resume} at {episodes_done:,} deals (best vs policy {best_vs_policy:+.3f})", flush=True)
+        print(
+            f"Resumed {args.resume} at {episodes_done:,} deals "
+            f"(best Q {best_vs_policy:+.3f}, best B {best_belief_ce:.4f})",
+            flush=True,
+        )
 
     need_belief_data = args.train_belief or args.aux_own_coef > 0.0
     env = bgc.BgBatchPlayEnv(
@@ -375,6 +381,7 @@ def main() -> None:
             "q_sched": q_sched.state_dict(),
             "episodes_done": episodes_done,
             "best_vs_policy": best_vs_policy,
+            "best_belief_ce": best_belief_ce,
             "encoder_version": bgc.ENCODER_VERSION,
         }
         if b_model is not None:
@@ -426,19 +433,24 @@ def main() -> None:
         q_loss_sum = own_loss_sum = b_loss_sum = 0.0
         n_mb = 0
 
-        # 4 ply-length buckets: [0..7], [8..15], [16..23], [24..31]
+        # 4 ply-length buckets: [0..7], [8..15], [16..23], [24..31], shuffled across buckets
+        # so AdamW updates are i.i.d. across tricks rather than always ending on trick 7!
         buckets = (nplies_f // 8).clamp(0, 3)
+        mb_schedule: list[tuple[int, torch.Tensor]] = []
         for bkt in range(4):
             b_indices = torch.nonzero(buckets == bkt, as_tuple=False).squeeze(-1)
             nb = b_indices.numel()
             if nb == 0:
                 continue
             perm = b_indices[torch.randperm(nb, device=device)]
-            max_len = int(nplies_f[b_indices].max().item())
-            h_len = max(1, max_len)
-
+            h_len = max(1, int(nplies_f[b_indices].max().item()))
             for start in range(0, nb, args.batch_size):
-                mb_idx = perm[start : start + args.batch_size]
+                mb_schedule.append((h_len, perm[start : start + args.batch_size]))
+
+        if mb_schedule:
+            order = rng.permutation(len(mb_schedule))
+            for oi in order:
+                h_len, mb_idx = mb_schedule[int(oi)]
                 s_mb = states_f[mb_idx]
                 h_mb = hists_f[mb_idx, :h_len, :]
                 np_mb = nplies_f[mb_idx]
@@ -526,15 +538,19 @@ def main() -> None:
                     f"T7 {br['model'].get(7,0):.4f}/{br['sampler'].get(7,0):.4f})",
                     flush=True,
                 )
+                if br["model"][0] < best_belief_ce:
+                    best_belief_ce = br["model"][0]
+                    b_model.export_bin(args.export_dir / "bg_belief.bin")
+                    torch.save({"b_model": b_model.state_dict(), "best_belief_ce": best_belief_ce, "episodes_done": episodes_done},
+                               args.save.with_name(args.save.stem + "_best_belief.pt"))
+                    print(f"  >>> New best B_phi ({best_belief_ce:.4f})! Exported bg_belief.bin.", flush=True)
             save_ckpt(args.save)
             if ev["mean"] > best_vs_policy:
                 best_vs_policy = ev["mean"]
                 best_path = args.save.with_name(args.save.stem + "_best.pt")
                 save_ckpt(best_path)
                 q_model.export_bin(args.export_dir / "bg_q_gru.bin")
-                if b_model is not None:
-                    b_model.export_bin(args.export_dir / "bg_belief.bin")
-                print(f"  >>> New best ({best_vs_policy:+.3f})! Saved {best_path} & exported C++ bins.", flush=True)
+                print(f"  >>> New best Q-GRU ({best_vs_policy:+.3f})! Saved {best_path} & exported bg_q_gru.bin.", flush=True)
 
     # Load best checkpoint for final export + FastPolicy distillation.
     best_path = args.save.with_name(args.save.stem + "_best.pt")
