@@ -15,6 +15,7 @@
 //          --z Z  --policy (the rule policy alone)  --seed S
 
 #include "bg/agent.h"
+#include "bg/bid_model.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -32,10 +33,12 @@ int main(int argc, char** argv) {
     bool qgru_only = false;
     bool fast_only = false;
     std::uint64_t seed = 0;
-    std::string fast_path, belief_path, qgru_path;
+    std::string fast_path, belief_path, qgru_path, bid_path;
     std::string fast_suit, belief_suit, qgru_suit;
     std::string fast_nt, belief_nt, qgru_nt;
     std::string fast_at, belief_at, qgru_at;
+    bool bid_allow_double = false;
+    double bid_double_margin = 3.0;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -47,6 +50,9 @@ int main(int argc, char** argv) {
         else if (a == "--pool") o.pool = std::stoi(next());
         else if (a == "--z") o.z = std::stod(next());
         else if (a == "--margin") o.margin = std::stod(next());
+        else if (a == "--bid") bid_path = next();
+        else if (a == "--bid-double") bid_allow_double = true;
+        else if (a == "--bid-double-margin") bid_double_margin = std::stod(next());
         else if (a == "--fast") fast_path = next();
         else if (a == "--belief") belief_path = next();
         else if (a == "--qgru") qgru_path = next();
@@ -77,6 +83,11 @@ int main(int argc, char** argv) {
     BgFastPolicyModel fast_model, fast_m_suit, fast_m_nt, fast_m_at;
     BgBeliefModel belief_model, belief_m_suit, belief_m_nt, belief_m_at;
     BgQGRUModel q_model, q_m_suit, q_m_nt, q_m_at;
+    BgBidModel bid_model;
+    if (!bid_path.empty() && !bid_model.load(bid_path)) {
+        std::cerr << "bg_agent: failed to load --bid " << bid_path << std::endl;
+        return 2;
+    }
     auto loadOne = [](auto& m, const std::string& p, const auto*& dst, const char* tag) -> bool {
         if (p.empty()) return true;
         if (!m.load(p)) {
@@ -108,6 +119,29 @@ int main(int argc, char** argv) {
         std::string cmd;
         in >> cmd;
         if (cmd == "QUIT") break;
+        if (cmd == "BID") {
+            BidPublicState bs;
+            long long hand = 0;
+            int avail = 0, n = 0;
+            in >> bs.first >> bs.me >> hand >> avail >> n;
+            bs.hand5 = Mask(hand);
+            bs.avail = std::uint8_t(avail);
+            for (int i = 0, s, b; i < n && in >> s >> b; ++i) bs.bids.push_back({s, std::uint8_t(b)});
+            in >> bs.sn >> bs.ew >> bs.hanging;
+            int chosen = int(kPass);
+            try {
+                if (bid_model.loaded()) {
+                    chosen = int(bid_model.chooseBid(bs, bid_allow_double, bid_double_margin));
+                } else {
+                    chosen = int(kPass);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "bg_agent BID: " << e.what() << std::endl;
+                chosen = int(kPass);
+            }
+            std::cout << chosen << std::endl;
+            continue;
+        }
         if (cmd != "PLAY") {
             std::cout << "ERR unknown command" << std::endl;
             continue;

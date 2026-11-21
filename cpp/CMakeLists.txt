@@ -76,6 +76,7 @@ add_library(belote_bg STATIC
     bg/batch_env.cpp
     bg/neural.cpp
     bg/match_equity.cpp
+    bg/bid_model.cpp
 )
 target_link_libraries(belote_bg PUBLIC belote_core Threads::Threads)
 target_compile_options(belote_bg PRIVATE ${BELOTE_WARNINGS})

@@ -1,6 +1,7 @@
 #include "bg/agent.h"
 #include "bg/batch_env.h"
 #include "bg/bg.h"
+#include "bg/bid_model.h"
 #include "bg/encoder.h"
 #include "bg/neural.h"
 #include "bg/rule_policy.h"
@@ -431,4 +432,86 @@ PYBIND11_MODULE(bg_cpp, m) {
             self.forwardQ(st.data(), hist.data(), n_plies, acts.data(), n_legal, out.mutable_data());
             return out;
         });
+
+    m.attr("BID_VERSION") = kBgBidVersion;
+    m.attr("NUM_BIDS") = kBgNumBids;
+    m.attr("BID_SUIT_DIM") = kBgBidSuitDim;
+    m.attr("BID_GLOBAL_DIM") = kBgBidGlobalDim;
+    m.attr("BID_STEP_DIM") = kBgBidStepDim;
+    m.attr("MAX_BIDS") = kBgMaxBids;
+
+    py::class_<BgBidModel>(m, "BgBidModel")
+        .def(py::init<>())
+        .def("load", &BgBidModel::load)
+        .def("forward_q", [](const BgBidModel& self,
+                             py::array_t<float, py::array::c_style | py::array::forcecast> sf,
+                             py::array_t<float, py::array::c_style | py::array::forcecast> gf,
+                             py::array_t<float, py::array::c_style | py::array::forcecast> bh,
+                             int n_bids) {
+            py::array_t<float> out({kBgNumBids});
+            self.forwardQ(sf.data(), gf.data(), bh.data(), n_bids, out.mutable_data());
+            return out;
+        });
+
+    py::class_<BgBatchBidEnv>(m, "BgBatchBidEnv")
+        .def(py::init<const std::string&, const std::string&, const std::string&, int>(),
+             py::arg("fast_at"), py::arg("fast_suit"), py::arg("fast_nt"), py::arg("threads") = 12)
+        .def("load_bid_model", &BgBatchBidEnv::loadBidModel)
+        .def("generate_batch",
+             [](const BgBatchBidEnv& self, int num_deals, std::uint64_t seed, double explore_eps, bool allow_double) {
+                 CounterfactualBidBatch b;
+                 {
+                     py::gil_scoped_release release;
+                     b = self.generateBatch(num_deals, seed, explore_eps, allow_double);
+                 }
+                 const py::ssize_t N = b.n_samples;
+                 py::array_t<float> sf({N, py::ssize_t(4), py::ssize_t(kBgBidSuitDim)});
+                 py::array_t<float> gf({N, py::ssize_t(kBgBidGlobalDim)});
+                 py::array_t<float> bh({N, py::ssize_t(kBgMaxBids), py::ssize_t(kBgBidStepDim)});
+                 py::array_t<std::int32_t> nb({N});
+                 py::array_t<float> lm({N, py::ssize_t(kBgNumBids)});
+                 py::array_t<float> tgt({N, py::ssize_t(kBgNumBids)});
+                 if (N > 0) {
+                     std::memcpy(sf.mutable_data(), b.suit_feats.data(), b.suit_feats.size() * sizeof(float));
+                     std::memcpy(gf.mutable_data(), b.global_feats.data(), b.global_feats.size() * sizeof(float));
+                     std::memcpy(bh.mutable_data(), b.bid_hist.data(), b.bid_hist.size() * sizeof(float));
+                     std::memcpy(nb.mutable_data(), b.n_bids.data(), b.n_bids.size() * sizeof(std::int32_t));
+                     std::memcpy(lm.mutable_data(), b.legal_mask.data(), b.legal_mask.size() * sizeof(float));
+                     std::memcpy(tgt.mutable_data(), b.targets.data(), b.targets.size() * sizeof(float));
+                 }
+                 py::dict out;
+                 out["n_samples"] = b.n_samples;
+                 out["suit_feats"] = std::move(sf);
+                 out["global_feats"] = std::move(gf);
+                 out["bid_hist"] = std::move(bh);
+                 out["n_bids"] = std::move(nb);
+                 out["legal_mask"] = std::move(lm);
+                 out["targets"] = std::move(tgt);
+                 return out;
+             },
+             py::arg("num_deals"), py::arg("seed") = 1, py::arg("explore_eps") = 0.08,
+             py::arg("allow_double") = false)
+        .def("eval_vs_natural",
+             [](const BgBatchBidEnv& self, int num_deals, std::uint64_t seed, int opp_at_bonus, bool mixed_partner,
+                bool allow_double) {
+                 BgBatchBidEnv::DuelSummary s;
+                 {
+                     py::gil_scoped_release release;
+                     s = self.evalVsNatural(num_deals, seed, opp_at_bonus, mixed_partner, allow_double);
+                 }
+                 py::dict out;
+                 out["mean"] = s.mean;
+                 out["ci"] = s.ci;
+                 out["deals"] = s.deals;
+                 out["pct_suit"] = s.pct_suit;
+                 out["pct_nt"] = s.pct_nt;
+                 out["pct_at"] = s.pct_at;
+                 out["pct_pass"] = s.pct_pass;
+                 out["suit_has_j9"] = s.suit_has_j9;
+                 out["nt_has_ace"] = s.nt_has_ace;
+                 out["at_has_j"] = s.at_has_j;
+                 return out;
+             },
+             py::arg("num_deals") = 2000, py::arg("seed") = 54321, py::arg("opp_at_bonus") = 0,
+             py::arg("mixed_partner") = false, py::arg("allow_double") = false);
 }
