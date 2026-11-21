@@ -26,6 +26,9 @@ if(MSVC)
     set(BELOTE_WARNINGS /W4)
 else()
     set(BELOTE_WARNINGS -Wall -Wextra)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        list(APPEND BELOTE_WARNINGS -march=native)
+    endif()
 endif()
 
 # The engine, what a player knows (observation) and the world sampler.

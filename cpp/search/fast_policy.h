@@ -43,9 +43,10 @@ private:
     int h1_ = 0;
     int h2_ = 0;
     int out_dim_ = 0;
-    std::vector<float> w1_, b1_;
-    std::vector<float> w2_, b2_;
-    std::vector<float> w3_, b3_;
+    // Column-major transposed weights [in_dim][out_dim] for sparse-input AVX2 GEMV.
+    std::vector<float> w1_t_, b1_;
+    std::vector<float> w2_t_, b2_;
+    std::vector<float> w3_t_, b3_;
 };
 
 struct HybridOptions {

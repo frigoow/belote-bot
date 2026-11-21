@@ -16,22 +16,35 @@ namespace belote {
 
 namespace {
 
-void linearRelu(const float* in, int in_dim, const float* w, const float* b, int out_dim, float* out) {
-    for (int o = 0; o < out_dim; ++o) {
-        const float* row = w + std::size_t(o) * std::size_t(in_dim);
-        float acc = b[o];
-        for (int i = 0; i < in_dim; ++i) acc += row[i] * in[i];
-        out[o] = acc > 0.0f ? acc : 0.0f;
+// Sparse-input column-major GEMV: skips zero inputs (~88% of state[697] and
+// ~50% of ReLU activations are exact 0.0f) and runs contiguous SIMD FMA over
+// the output vector for every non-zero input.
+void sparseLinearRelu(const float* in, int in_dim, const float* w_t, const float* b, int out_dim, float* out) {
+    std::memcpy(out, b, sizeof(float) * std::size_t(out_dim));
+    for (int i = 0; i < in_dim; ++i) {
+        const float x = in[i];
+        if (x == 0.0f) continue;
+        const float* col = w_t + std::size_t(i) * std::size_t(out_dim);
+        for (int o = 0; o < out_dim; ++o) out[o] += x * col[o];
+    }
+    for (int o = 0; o < out_dim; ++o)
+        if (out[o] < 0.0f) out[o] = 0.0f;
+}
+
+void sparseLinearOut(const float* in, int in_dim, const float* w_t, const float* b, int out_dim, float* out) {
+    std::memcpy(out, b, sizeof(float) * std::size_t(out_dim));
+    for (int i = 0; i < in_dim; ++i) {
+        const float x = in[i];
+        if (x == 0.0f) continue;
+        const float* col = w_t + std::size_t(i) * std::size_t(out_dim);
+        for (int o = 0; o < out_dim; ++o) out[o] += x * col[o];
     }
 }
 
-void linearOut(const float* in, int in_dim, const float* w, const float* b, int out_dim, float* out) {
-    for (int o = 0; o < out_dim; ++o) {
-        const float* row = w + std::size_t(o) * std::size_t(in_dim);
-        float acc = b[o];
-        for (int i = 0; i < in_dim; ++i) acc += row[i] * in[i];
-        out[o] = acc;
-    }
+void transposeRowMajor(const std::vector<float>& src, int rows, int cols, std::vector<float>& dst) {
+    dst.resize(std::size_t(rows) * std::size_t(cols));
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c) dst[std::size_t(c) * std::size_t(rows) + std::size_t(r)] = src[std::size_t(r) * std::size_t(cols) + std::size_t(c)];
 }
 
 std::mt19937_64& hybridRng() {
@@ -66,11 +79,17 @@ std::shared_ptr<const FastPolicyModel> FastPolicyModel::load(const std::string& 
         in.read(reinterpret_cast<char*>(v.data()), std::streamsize(n * sizeof(float)));
         if (!in) throw std::runtime_error("FastPolicyModel: truncated weights in " + path);
     };
-    readVec(m->w1_, std::size_t(m->h1_) * std::size_t(m->state_dim_));
+    std::vector<float> tmp;
+    readVec(tmp, std::size_t(m->h1_) * std::size_t(m->state_dim_));
+    transposeRowMajor(tmp, m->h1_, m->state_dim_, m->w1_t_);
     readVec(m->b1_, std::size_t(m->h1_));
-    readVec(m->w2_, std::size_t(m->h2_) * std::size_t(m->h1_));
+
+    readVec(tmp, std::size_t(m->h2_) * std::size_t(m->h1_));
+    transposeRowMajor(tmp, m->h2_, m->h1_, m->w2_t_);
     readVec(m->b2_, std::size_t(m->h2_));
-    readVec(m->w3_, std::size_t(m->out_dim_) * std::size_t(m->h2_));
+
+    readVec(tmp, std::size_t(m->out_dim_) * std::size_t(m->h2_));
+    transposeRowMajor(tmp, m->out_dim_, m->h2_, m->w3_t_);
     readVec(m->b3_, std::size_t(m->out_dim_));
     return m;
 }
@@ -80,9 +99,9 @@ void FastPolicyModel::forward(const float* state, float* logits_out) const {
     thread_local std::vector<float> buf2;
     if (int(buf1.size()) < h1_) buf1.resize(std::size_t(h1_));
     if (int(buf2.size()) < h2_) buf2.resize(std::size_t(h2_));
-    linearRelu(state, state_dim_, w1_.data(), b1_.data(), h1_, buf1.data());
-    linearRelu(buf1.data(), h1_, w2_.data(), b2_.data(), h2_, buf2.data());
-    linearOut(buf2.data(), h2_, w3_.data(), b3_.data(), out_dim_, logits_out);
+    sparseLinearRelu(state, state_dim_, w1_t_.data(), b1_.data(), h1_, buf1.data());
+    sparseLinearRelu(buf1.data(), h1_, w2_t_.data(), b2_.data(), h2_, buf2.data());
+    sparseLinearOut(buf2.data(), h2_, w3_t_.data(), b3_.data(), out_dim_, logits_out);
 }
 
 void FastPolicyModel::evalObservation(const Observation& obs, float* logits_out) const {
