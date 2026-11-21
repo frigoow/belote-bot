@@ -22,12 +22,23 @@ struct Toon {
 enum class ToonKind { kDerde, kVierde, kVijfde, kCarre };
 ToonKind kindOf(const Toon& t);
 
+// The announcement: the kind of the player's best toon (by toonKey) and, for
+// a carré, its rank ("carré van boeren"). Heights of sequences are not said.
+struct Announcement {
+    ToonKind kind = ToonKind::kDerde;
+    int carre_rank = -1;  // carré only
+};
+// `toons` must not be empty.
+Announcement announcementOf(const std::vector<Toon>& toons, int trump);
+
 int sequencePoints(int length);
 int carrePoints(int rank, const Config& cfg);  // 0: not a toon
 
 // The toons a hand declares. A card is used in at most one toon; carrés may
 // be left out to keep a longer sequence, and the split worth the most points
-// is chosen. Sequences are maximal runs and are never split.
+// is chosen (breaking equal-point ties in favor of keeping a carré, since any
+// carré beats any sequence in toonKey). Sequences are maximal runs and are
+// never split.
 std::vector<Toon> findToons(Mask hand, const Config& cfg);
 
 // Comparison key of one toon: a higher key is a better toon. Seat order

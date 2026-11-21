@@ -9,6 +9,16 @@ ToonKind kindOf(const Toon& t) {
     return ToonKind::kVijfde;
 }
 
+Announcement announcementOf(const std::vector<Toon>& toons, int trump) {
+    const Toon* best = &toons.front();
+    for (const Toon& t : toons)
+        if (toonKey(t, trump) > toonKey(*best, trump)) best = &t;
+    Announcement a;
+    a.kind = kindOf(*best);
+    if (best->carre) a.carre_rank = best->rank;
+    return a;
+}
+
 int sequencePoints(int length) {
     if (length >= 5) return 100;
     if (length == 4) return 50;
@@ -83,7 +93,9 @@ std::vector<Toon> findToons(Mask hand, const Config& cfg) {
         }
         appendSequences(rest, pick);
         const int points = totalPoints(pick);
-        if (points > best_points) {
+        // Break equal-point ties in favor of subsets with a carré (higher s),
+        // because any carré beats any sequence in toonKey().
+        if (points >= best_points) {
             best_points = points;
             best = std::move(pick);
         }

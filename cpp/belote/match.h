@@ -11,7 +11,16 @@
 namespace belote {
 
 // Raw points as written on the score sheet: units (nearest ten, 5 up) or raw.
+// In kComplement mode this is the defenders' rounding.
 int recordedPoints(int raw, const Config& cfg);
+
+// What a decided deal writes on the score sheet: each team's recorded score
+// and, for a hanging deal, the takers' recorded points that are held over.
+struct RecordedDeal {
+    std::array<int, 2> scores{0, 0};
+    int held = 0;
+};
+RecordedDeal recordDeal(const DealResult& result, const Config& cfg);
 
 class Match {
 public:

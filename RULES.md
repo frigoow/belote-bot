@@ -1,17 +1,26 @@
 # Belgian Belote -- engine rules
 
-The rules the engine implements. Where the sources are silent or disagree, the
-default chosen here is marked **[default]** and is a config flag (see the table
-at the end), so it can change without touching the engine.
+The rules the engine implements. The profile is that of **belote-rebelote.be**
+(`Config::belgian()`, the default). Where it is silent, [WB] and the house
+rules fill in. Where the sources are silent or disagree, the default chosen
+here is marked **[default]** and is a config flag (see the table at the end),
+so it can change without touching the engine. `Config::wikibooks()` keeps the
+[WB] + house profile the engine started from.
 
 Sources:
+- **[BR]** [belote-rebelote.be/regles-belote](https://www.belote-rebelote.be/regles-belote)
+  and [/compter-points-belote](https://www.belote-rebelote.be/compter-points-belote),
+  a Belgian online implementation. This is the primary profile (chosen
+  2026-11-21). It is silent on deal direction, toon timing and comparison,
+  runs longer than 5, and rounding at exactly 5.
 - **[WB]** [nl.wikibooks.org/wiki/Kaartspel/Belot](https://nl.wikibooks.org/wiki/Kaartspel/Belot).
-  This is the primary source. Its trump selection matches the house rules the
-  players described.
+  The original primary source. Its trump selection matches the house rules the
+  players described, and it agrees with [BR] there.
 - **[CGH]** [cardgameshub.com/nl/kenniscentrum/spelregels-belote](https://cardgameshub.com/nl/kenniscentrum/spelregels-belote/).
 - **[House]** House rules confirmed by the players (Jonas, Niels). Where these
-  differ from a source, the house rule wins. Confirmed: [WB] is right, the
-  match is played to 101.
+  differ from [WB] or [CGH], the house rule wins. Confirmed: [WB] is right, the
+  match is played to 101. Where [BR] differs (recording, the 2-point lead,
+  belot order), [BR] wins, and the house choice is kept as a flag.
 
 Dutch game terms are kept in *italics*.
 
@@ -33,7 +42,7 @@ Dutch game terms are kept in *italics*.
   - everyone else gets 3,
   - dealt clockwise from the player after the dealer, so everyone ends up with 8.
 - **Redeal**: if nobody makes trump in either round, the next player deals
-  [House]. [WB]'s "two fruitless attempts" are read as the two bidding rounds.
+  [House, BR]. [WB]'s "two fruitless attempts" are read as the two bidding rounds.
 - The next deal passes clockwise to the next dealer.
 - Shuffling and cutting are cosmetic for the engine (random deal).
 
@@ -43,7 +52,8 @@ Dutch game terms are kept in *italics*.
    either takes the blik's suit as trump or passes (*pas*). The dealer speaks last.
 2. **Round 2**: if all four passed, again starting with the player after the
    dealer, each player in turn may name a trump suit himself or pass (*pas nog*).
-   - The suit named must differ from the blik's suit ("een andere troef" [House]).
+   - The suit named must differ from the blik's suit ("een andere troef" [House];
+     "autre que celle de la carte retournée" [BR]).
    - The player still takes the blik into their hand [House].
 3. If all four pass again, the cards are redealt (§1).
 
@@ -94,8 +104,9 @@ Legal cards, in order:
    - If the opponent is winning with a trump:
      - you must overtrump if you can (*overtroeven*);
      - if you can't, you must still play a lower trump (*onderpissen*,
-       *onderkopen*). Both sources and [House] agree. This differs from
-       Manille, where you may then discard a non-trump.
+       *onderkopen*). Both sources, [BR] ("la sous-coupe obligatoire") and
+       [House] agree. This differs from Manille, where you may then discard a
+       non-trump.
 
 An illegal play counts as cheating at the table. The engine simply never offers it.
 
@@ -119,13 +130,23 @@ An illegal play counts as cheating at the table. The engine simply never offers 
   [WB]. The engine picks the split worth the most points. A carré may be left
   out to keep a longer sequence. A sequence is always its whole run and is
   never split, so a run of 8 is one toon of 100.
-- **Announcing**: a player announces their toon (its type, e.g. "vierde") when
-  playing their first card. Declaring is optional **[default]**: a player
-  declares all their toons or none of them.
+- **Announcing**: a player announces their toon when playing their first card
+  [WB]. They say the kind of their **best** toon (*derde*, *vierde*, *vijfde*
+  or carré), and for a carré also its rank, e.g. "carré van boeren"
+  **[default]**. The height of a sequence isn't said. Declaring is optional
+  **[default]**: a player declares all their toons or none of them.
 - **Showing**: at the 3rd trick, when playing their 3rd card, the declarer
-  shows the toon [WB, House]. A toon that isn't shown in time scores nothing.
-  Cards already played in tricks 1–2 still count. [CGH] settles the comparison
-  after the first trick instead (flag).
+  shows their toons [WB, House]. Only the team holding the **highest toon**
+  shows ("degene met geldige toon" [WB]); a beaten toon lapses and stays
+  hidden **[default]**, flag `toon_losers_show`. A toon that isn't shown in time
+  scores nothing. Cards already played in tricks 1–2 still count. [CGH] settles
+  the comparison after the first trick instead (flag; the toons are then shown
+  once trick 1 is complete).
+  - [WB]'s trick-3 exchange between equal toons ("men zegt wat de hoogste kaart
+    van zijn toon is") is not modelled: the engine compares the toons itself,
+    and the public outcome is who shows.
+  - [WB] lets the lower toon show in trick 4 if the winner forgets to show.
+    Players in the engine never forget, so this is not modelled.
 - **Comparing**: only the team with the **highest toon** scores, and then it
   scores all of its toons, including the partner's lower ones. The other
   team's toons score nothing. To find the highest toon:
@@ -142,8 +163,9 @@ An illegal play counts as cheating at the table. The engine simply never offers 
 - K (*belot*) and Q (*rebelot*) of trumps in the same hand: 20 points.
 - The player says "belot" when playing the first of the two and "rebelot" when
   playing the second.
-- [WB] says the king must be played first. Playing the queen first forfeits
-  the 20 **[default: forfeits rather than being illegal]**.
+- [BR] says "belote" is called "en jouant la première des deux": either card
+  may come first **[default]**. [WB] says the king must be played first; with
+  flag `belot_queen_first_forfeits`, playing the queen first forfeits the 20.
 - Belot is always 20 [CGH]. It is never compared, always counts for the
   holder's team (even on *nat* and even if that team takes no trick, [CGH]),
   and may share cards with a toon **[default]**.
@@ -167,26 +189,31 @@ Each team's total = card points + scoring toon + belot.
   to the defenders.
 
 - **`tie_rule`**: the two sources disagree.
-  - `hanging` **[WB, House]**: the defenders score their total. The takers'
+  - `hanging` **[WB, House, BR]**: the defenders score their total. The takers'
     points are held over (*op den boek*) and go to the team that wins the next
     deal (made or nat), accumulating over consecutive ties.
   - `takers_make` [CGH: "minimaal evenveel"]: a tie counts as made.
 - [WB] phrases the target as "at least 81". That is the same thing when nobody
   has toon or belot.
-- **Recording** (`units` mode, [WB]): each team's total is rounded to the
-  nearest ten and written down in units, with 5 rounding up (75 → 8, 74 → 7).
-  The two rounded numbers need not add up to 16.
-  In `raw` mode ([CGH]), points are recorded as-is.
+- **Recording** (`complement` mode, [BR], the default): the defenders' total
+  is rounded to the nearest ten and written down in units; the takers get the
+  rest of the deal's units: 16, plus every toon and belot point divided by 10.
+  [BR]'s example: defenders 64 → 6, takers 16 − 6 = 10; with a *derde* for
+  the takers, 12. [BR] doesn't say how 5 rounds; the engine rounds it up
+  (75 → 8) as [WB] does **[default]**. A *nat* gives the defenders 16 + toon
+  (+ own belot), a ronde 25, a hanging 81–81 writes 8 and holds 8.
+  - `units` mode ([WB]): each team's total is rounded on its own, 5 up
+    (75 → 8, 74 → 7), so the two need not add up to 16.
+  - `raw` mode ([CGH]): points are recorded as-is.
 
 ## 7. The match
 
-- **[WB, House]**: the first team to reach **101 recorded units** wins
-  (*de boom*).
+- **[WB, House, BR]**: the first team to reach **101 recorded units** wins
+  (*de boom*), and **[BR]**: with a lead of at least 2 ("avec au moins 2
+  points d'écart"). [WB] needs any lead (`match_win_margin = 0`).
 - [CGH] plays to **1001 raw points** ("vaak", so a custom, not a rule).
-- If both teams pass the target in the same deal, the higher score wins; if
-  they are equal, another deal is played **[default]**.
-- To check: belote-rebelote.be (in the research report) reportedly uses 101
-  with a **two-point lead** (flag `match_win_margin`).
+- If both teams pass the target in the same deal, the higher score wins if it
+  leads by the margin; otherwise another deal is played **[default]**.
 
 ---
 
@@ -201,9 +228,10 @@ Each team's total = card points + scoring toon + belot.
 | `carre_low_points` | 0 | 50 for four 7s / four 8s |
 | `toon_optional` | true | must declare |
 | `toon_show_trick` | 3 [WB, House] | 1 ([CGH]) |
-| `belot_queen_first_forfeits` | true | queen first is illegal |
-| `tie_rule` | `hanging` [WB, House] | `takers_make` [CGH] |
-| `score_mode` | `units` [WB, House] | `raw` [CGH] |
-| `match_target` | 101 (units) [House] | 1001 (raw) |
-| `match_win_margin` | 0 | 2 (belote-rebelote.be) |
+| `toon_losers_show` | false [WB] | true: every announced toon is shown |
+| `belot_queen_first_forfeits` | false [BR] | true [WB]: queen first forfeits the 20 |
+| `tie_rule` | `hanging` [WB, House, BR] | `takers_make` [CGH] |
+| `score_mode` | `complement` [BR] | `units` [WB, House], `raw` [CGH] |
+| `match_target` | 101 (units) [House, BR] | 1001 (raw) |
+| `match_win_margin` | 2 [BR] | 0 [WB] |
 | `ronde_points` | 252 | |

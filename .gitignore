@@ -4,3 +4,7 @@ cpp/build/
 cpp/build-*/
 *.o
 .vscode/
+.venv/
+*.so
+__pycache__/
+.pytest_cache/

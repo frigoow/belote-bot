@@ -50,6 +50,14 @@ void checkDealInvariants(const Deal& d) {
     CHECK(card_total == kDealPoints || (r.ronde_team >= 0 && card_total == 252));
     for (int p = 0; p < kPlayers; ++p) CHECK_EQ(d.hand(p), 0u);
     CHECK(r.toon_points[0] == 0 || r.toon_points[1] == 0);
+    // Only one team shows (toon_losers_show = false), and only real toons are announced.
+    for (int p = 0; p < kPlayers; ++p) {
+        if (d.shown(p)) CHECK(d.announced(p) && !(d.shown((p + 1) % kPlayers) || d.shown((p + 3) % kPlayers)));
+        if (d.announced(p)) CHECK(announcementOf(d.toons(p), r.trump).kind == d.announcement(p).kind);
+    }
+    // Complement recording: the two teams' units (plus any held) are the deal's units.
+    const RecordedDeal rec = recordDeal(r, d.config());
+    CHECK_EQ(rec.scores[0] + rec.scores[1] + rec.held, (r.credited[0] + r.credited[1] + r.held) / 10);
     switch (r.outcome) {
         case Outcome::kMade:
             CHECK(r.totals[r.takers] > r.totals[1 - r.takers] || r.ronde_team == r.takers);

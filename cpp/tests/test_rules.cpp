@@ -14,7 +14,8 @@ using namespace belote;
 
 namespace {
 
-const Config kBelgian = Config::belgian();
+const Config kBelgian = Config::belgian();     // belote-rebelote.be, the default
+const Config kWikibooks = Config::wikibooks();
 
 Trick makeTrick(std::initializer_list<std::pair<int, const char*>> plays) {
     Trick t;
@@ -116,6 +117,13 @@ void testFindToons() {
     Config low = kBelgian;
     low.carre_low_points = 50;
     CHECK_EQ(points(findToons(parseCards("7C 7D 7H 7S AC KD QH 9S"), low)), 50);
+
+    // Equal-points overlap: four queens (100) + 10-J-K-A of hearts (vijfde = 100).
+    // Keep the carré, because any carré beats any sequence in comparison.
+    t = findToons(parseCards("QC QD QH QS 10H JH KH AH"), kBelgian);
+    CHECK_EQ(t.size(), 1u);
+    CHECK_EQ(points(t), 100);
+    CHECK(t[0].carre && t[0].rank == kQ);
 
     // No wrap-around: A 7 8 is not a sequence.
     CHECK(findToons(parseCards("AH 7H 8H JC 9D KS 10S QD"), kBelgian).empty());
@@ -258,15 +266,20 @@ void testBelotAndDealFlow() {
         parseCards("7H 8H 9H 10H JH QH KH AH"), parseCards("7C 8C 9C 10C JC QC KC AC"),
         parseCards("7D 8D 9D 10D JD QD KD AD"), parseCards("7S 8S 9S 10S JS QS KS AS")};
 
-    // Lowest card first: the queen goes before the king, so no belot.
+    // Lowest card first: the queen goes before the king. [BR]: belot on
+    // "la première des deux", so it still counts.
     DealResult r = playOut(Deal::fromPlay(kBelgian, 3, 0, kHearts, hands), true);
     CHECK_EQ(r.ronde_team, 0);
+    CHECK_EQ(r.belot_team, 0);
+    CHECK_EQ(r.credited[0], 252 + 200 + 20);
+    CHECK_EQ(r.credited[1], 0);
+    // [WB]: the king must come first; queen first forfeits the 20.
+    r = playOut(Deal::fromPlay(kWikibooks, 3, 0, kHearts, hands), true);
     CHECK_EQ(r.belot_team, -1);
     CHECK_EQ(r.credited[0], 252 + 200);
-    CHECK_EQ(r.credited[1], 0);
 
     // Highest first: king before queen, belot counts.
-    r = playOut(Deal::fromPlay(kBelgian, 3, 0, kHearts, hands), false);
+    r = playOut(Deal::fromPlay(kWikibooks, 3, 0, kHearts, hands), false);
     CHECK_EQ(r.belot_team, 0);
     CHECK_EQ(r.credited[0], 252 + 200 + 20);
 
@@ -275,7 +288,9 @@ void testBelotAndDealFlow() {
     CHECK_EQ(r.belot_team, 0);
     CHECK_EQ(r.credited[0], 252 + 20);
 
-    // Declining to declare.
+    // Declining to declare. Player 1 then sits first among equal runs of 8, so
+    // team 1 holds the best toon and player 2 doesn't show; the ronde still
+    // counts all of team 0's announced toons.
     Deal d = Deal::fromPlay(kBelgian, 3, 0, kHearts, hands);
     CHECK(d.canSetDeclare(0));
     d.setDeclare(0, false);
@@ -285,14 +300,42 @@ void testBelotAndDealFlow() {
     CHECK(d.canSetDeclare(1));
     CHECK_EQ(playOut(d, false).credited[0], 252 + 100 + 20);  // only player 2's run
 
-    // Announced with the first card, shown with the third.
+    // Announced with the first card, shown with the third, and only by the
+    // team with the best toon ([WB]: "degene met geldige toon"): team 0's
+    // run of 8 in trumps beats the other runs of 8.
     d = Deal::fromPlay(kBelgian, 3, 0, kHearts, hands);
     for (int i = 0; i < 8; ++i) d.play(lowestCard(d.legalMoves()));  // 2 tricks
     CHECK(d.announced(0) && d.announced(1));
+    CHECK(d.announcement(1).kind == ToonKind::kVijfde);
+    CHECK_EQ(d.announcement(1).carre_rank, -1);
+    CHECK(!d.shown(0));
+    for (int i = 0; i < 4; ++i) d.play(lowestCard(d.legalMoves()));  // trick 3
+    CHECK(d.shown(0) && d.shown(2));
+    CHECK(!d.shown(1) && !d.shown(3));
+    Config losers = kBelgian;
+    losers.toon_losers_show = true;
+    d = Deal::fromPlay(losers, 3, 0, kHearts, hands);
+    for (int i = 0; i < 12; ++i) d.play(lowestCard(d.legalMoves()));
+    for (int p = 0; p < kPlayers; ++p) CHECK(d.shown(p));
+    // [CGH]: shown after the first trick, once every announcement is in.
+    Config early = kBelgian;
+    early.toon_show_trick = 1;
+    d = Deal::fromPlay(early, 3, 0, kHearts, hands);
+    for (int i = 0; i < 3; ++i) d.play(lowestCard(d.legalMoves()));
     CHECK(!d.shown(0));
     d.play(lowestCard(d.legalMoves()));
-    CHECK(d.shown(0));
-    CHECK(!d.shown(1));
+    CHECK(d.shown(0) && d.shown(2) && !d.shown(1));
+}
+
+void testAnnouncement() {
+    // The best toon is announced; a carré with its rank.
+    auto best = [](const char* hand) { return announcementOf(findToons(parseCards(hand), kBelgian), kHearts); };
+    Announcement a = best("JC JD JH JS 7C 8C 9C 10S");  // carré of jacks + derde
+    CHECK(a.kind == ToonKind::kCarre);
+    CHECK_EQ(a.carre_rank, kJ);
+    a = best("7C 8C 9C JS QS KS AS 9D");  // derde + vierde
+    CHECK(a.kind == ToonKind::kVierde);
+    CHECK_EQ(a.carre_rank, -1);
 }
 
 void testBidding() {
@@ -371,14 +414,14 @@ void testMatch() {
     s.record(fakeResult(Outcome::kAllPassed, -1, {0, 0}));
     CHECK_EQ(s.dealer(), 3);
 
-    // Race to 101: both past it and equal plays on; a lead wins.
-    Match e(kBelgian, 0);
+    // Race to 101: both past it and equal plays on; a lead wins ([WB]: any lead).
+    Match e(kWikibooks, 0);
     for (int i = 0; i < 6; ++i) e.record(fakeResult(Outcome::kMade, 0, {90, 72}));  // 9 / 7 a deal
     CHECK(!e.finished());
     e.record(fakeResult(Outcome::kMade, 0, {162, 0}));
     e.record(fakeResult(Outcome::kMade, 0, {0, 0}));
     CHECK_EQ(e.scores()[0], 70);
-    Match tie(kBelgian, 0);
+    Match tie(kWikibooks, 0);
     for (int i = 0; i < 7; ++i) tie.record(fakeResult(Outcome::kMade, 0, {150, 150}));
     CHECK_EQ(tie.scores()[0], 105);
     CHECK(!tie.finished());
@@ -386,14 +429,53 @@ void testMatch() {
     CHECK(tie.finished());
     CHECK_EQ(tie.winner(), 0);
 
-    // Two-point lead option.
-    Config margin = kBelgian;
-    margin.match_win_margin = 2;
-    Match g(margin, 0);
-    g.record(fakeResult(Outcome::kMade, 0, {1010, 1000}));
+    // [BR]: a two-point lead is needed past 101.
+    Match g(kBelgian, 0);
+    for (int i = 0; i < 7; ++i) g.record(fakeResult(Outcome::kMade, 0, {150, 150}));
+    g.record(fakeResult(Outcome::kMade, 0, {10, 0}));  // 106-105
     CHECK(!g.finished());
-    g.record(fakeResult(Outcome::kMade, 0, {10, 0}));
+    g.record(fakeResult(Outcome::kMade, 0, {10, 0}));  // 107-105
     CHECK(g.finished());
+    CHECK_EQ(g.winner(), 0);
+}
+
+RecordedDeal rec(Outcome o, std::array<int, 2> credited, int held = 0, const Config& cfg = kBelgian) {
+    return recordDeal(fakeResult(o, /*takers=*/0, credited, held), cfg);
+}
+
+void testRecording() {
+    // [BR] example: takers 98, defenders 64 -> 60 -> 6; takers 16 - 6 = 10.
+    RecordedDeal r = rec(Outcome::kMade, {98, 64});
+    CHECK_EQ(r.scores[0], 10);
+    CHECK_EQ(r.scores[1], 6);
+    // ... with a tierce for the takers: 2 more.
+    r = rec(Outcome::kMade, {118, 64});
+    CHECK_EQ(r.scores[0], 12);
+    CHECK_EQ(r.scores[1], 6);
+    // Defenders at 75 round up: 8, takers 8 (each rounded on its own: 9 + 8).
+    r = rec(Outcome::kMade, {87, 75});
+    CHECK_EQ(r.scores[0], 8);
+    CHECK_EQ(r.scores[1], 8);
+    r = rec(Outcome::kMade, {87, 75}, 0, kWikibooks);
+    CHECK_EQ(r.scores[0], 9);
+    CHECK_EQ(r.scores[1], 8);
+    // Defenders' own toon: 82 + 50 -> 13; takers 16 + 2 (belot) + ... - 8.
+    r = rec(Outcome::kMade, {150, 132});  // e.g. takers 80 + 50 + 20, defenders 82 + 50
+    CHECK_EQ(r.scores[1], 13);
+    CHECK_EQ(r.scores[0], 28 - 13);
+    // Nat: 16 (+ toon) to the defenders; the takers keep only their belot.
+    r = rec(Outcome::kNat, {20, 212});
+    CHECK_EQ(r.scores[0], 2);
+    CHECK_EQ(r.scores[1], 21);
+    // Ronde: 25.
+    r = rec(Outcome::kMade, {252, 0});
+    CHECK_EQ(r.scores[0], 25);
+    CHECK_EQ(r.scores[1], 0);
+    // Hanging 81-81: defenders 8, 8 held.
+    r = rec(Outcome::kHanging, {0, 81}, 81);
+    CHECK_EQ(r.scores[0], 0);
+    CHECK_EQ(r.scores[1], 8);
+    CHECK_EQ(r.held, 8);
 }
 
 }  // namespace
@@ -406,7 +488,9 @@ int main() {
     testToonComparison();
     testScoring();
     testBelotAndDealFlow();
+    testAnnouncement();
     testBidding();
     testMatch();
+    testRecording();
     return checkResult("test_rules");
 }

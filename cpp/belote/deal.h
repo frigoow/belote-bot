@@ -95,17 +95,25 @@ public:
     int taker() const { return taker_; }
     int takers() const { return taker_ < 0 ? -1 : teamOf(taker_); }
     int trump() const { return trump_; }
+    int bidsMade() const { return bids_made_; }  // passes before taker bid (0..3 R1, 4..7 R2, -1 fromPlay)
 
     // Toon. toons(p) is the best split of p's 8-card hand (private). Whether
     // p declares can be changed until p plays their first card; by default
-    // everybody declares. announced/shown are public.
+    // everybody declares. announced/announcement/shown are public: a player
+    // announces their best toon's kind (and a carré's rank) with their first
+    // card, and shows all their toons with their toon_show_trick-th card if
+    // their team holds the best toon (or always, with toon_losers_show).
     const std::vector<Toon>& toons(int player) const { return toons_[player]; }
     bool canSetDeclare(int player) const;
     void setDeclare(int player, bool declare);
+    bool declares(int player) const { return declare_[player]; }  // p's own choice (private)
     bool announced(int player) const { return announced_[player]; }
+    const Announcement& announcement(int player) const { return announcement_[player]; }  // if announced
     bool shown(int player) const { return shown_[player]; }
     int belotHolder() const { return belot_holder_; }        // private
     bool belotAnnounced() const { return belot_announced_; } // public
+    int belotAnnouncer() const { return belot_announced_ ? belot_holder_ : -1; }  // public
+    int belotCard() const { return belot_card_; }            // public: the card "belot" was said with
 
     // Play (phase kPlay).
     Mask legalMoves() const;
@@ -123,6 +131,7 @@ private:
     explicit Deal(const Config& cfg, int dealer);
     void startPlay();
     void finish();
+    bool showsToon(int player) const;
 
     Config cfg_;
     Phase phase_ = Phase::kBid1;
@@ -138,10 +147,12 @@ private:
     std::vector<Toon> toons_[kPlayers];
     std::array<bool, kPlayers> declare_{};
     std::array<bool, kPlayers> announced_{};
+    std::array<Announcement, kPlayers> announcement_{};
     std::array<bool, kPlayers> shown_{};
     int belot_holder_ = -1;
     int belot_first_rank_ = -1;  // rank of the first of K/Q the holder played
     bool belot_announced_ = false;
+    int belot_card_ = kNoCard;
 
     Trick trick_;
     int tricks_played_ = 0;

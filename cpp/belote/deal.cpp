@@ -162,6 +162,7 @@ Deal Deal::fromPlay(const Config& cfg, int dealer, int taker, int trump,
         all |= h;
     }
     Deal d(cfg, dealer);
+    d.bids_made_ = -1;
     d.hands_ = hands;
     d.taker_ = taker;
     d.trump_ = trump;
@@ -241,11 +242,18 @@ void Deal::play(int card) {
     const int p = current_;
     const int card_number = tricks_played_ + 1;  // this player's n-th card
 
-    if (card_number == 1 && declare_[p] && !toons_[p].empty()) announced_[p] = true;
-    if (card_number == cfg_.toon_show_trick && announced_[p]) shown_[p] = true;
+    if (card_number == 1 && declare_[p] && !toons_[p].empty()) {
+        announced_[p] = true;
+        announcement_[p] = announcementOf(toons_[p], trump_);
+    }
+    // From trick 2 on every announcement is in, so the best toon is known.
+    if (card_number == cfg_.toon_show_trick && card_number > 1 && showsToon(p)) shown_[p] = true;
     if (p == belot_holder_ && suitOf(card) == trump_ && (rankOf(card) == kK || rankOf(card) == kQ)) {
         if (belot_first_rank_ < 0) belot_first_rank_ = rankOf(card);
-        if (belot_first_rank_ == kK || !cfg_.belot_queen_first_forfeits) belot_announced_ = true;
+        if (!belot_announced_ && (belot_first_rank_ == kK || !cfg_.belot_queen_first_forfeits)) {
+            belot_announced_ = true;
+            belot_card_ = card;
+        }
     }
 
     hands_[p] &= ~bit(card);
@@ -266,16 +274,32 @@ void Deal::play(int card) {
     history_[tricks_played_] = trick_;
     trick_winners_[tricks_played_] = winner;
     ++tricks_played_;
+    if (tricks_played_ == 1 && cfg_.toon_show_trick == 1)  // shown once trick 1 is complete
+        for (int q = 0; q < kPlayers; ++q) shown_[q] = showsToon(q);
     trick_ = Trick{};
     current_ = winner;
     if (tricks_played_ == kTricks) finish();
 }
 
+bool Deal::showsToon(int player) const {
+    if (!announced_[player]) return false;
+    if (cfg_.toon_losers_show) return true;
+    std::vector<Toon> announced[kPlayers];
+    for (int p = 0; p < kPlayers; ++p)
+        if (announced_[p]) announced[p] = toons_[p];
+    return toonWinningTeam(announced, trump_, dealer_) == teamOf(player);
+}
+
 void Deal::finish() {
     phase_ = Phase::kDone;
+    // Shown toons count; on a ronde, all of the ronde team's announced toons
+    // count (a beaten toon is not shown, but the other team's toons are void).
+    int ronde_team = -1;
+    for (int t = 0; t < 2; ++t)
+        if (tricks_won_[t] == kTricks) ronde_team = t;
     std::vector<Toon> declared[kPlayers];
     for (int p = 0; p < kPlayers; ++p)
-        if (shown_[p]) declared[p] = toons_[p];
+        if (shown_[p] || (announced_[p] && teamOf(p) == ronde_team)) declared[p] = toons_[p];
     const int belot_team = belot_announced_ ? teamOf(belot_holder_) : -1;
     result_ = scoreDeal(cfg_, teamOf(taker_), trump_, dealer_, card_points_, tricks_won_, declared, belot_team);
 }
