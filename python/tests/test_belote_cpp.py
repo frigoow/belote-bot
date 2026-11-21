@@ -132,3 +132,23 @@ def test_match():
         match.record(deal.result)
     lead = max(match.scores) - min(match.scores)
     assert max(match.scores) >= 101 and lead >= 2
+
+
+def test_smart_choose_declare():
+    cfg = bc.Config.belgian()
+    # Seat 0 (partner of 2): no toon. Seat 1 (opp): vierde (50). Seat 2 (me): derde (20).
+    hands = [
+        bc.parse_cards("7C 9C JC KC 7D 8S JD KD"),
+        bc.parse_cards("7H 8H 9H 10H 7S 9S JS KS"),
+        bc.parse_cards("8D 9D 10D 8C 10C QC QD 10S"),
+        bc.parse_cards("AC AD AH JH QH KH QS AS"),
+    ]
+    deal = bc.Deal.from_play(cfg, 3, 0, 2, hands)
+    assert bc.smart_choose_declare(deal) is True  # seat 0 leads, no toon
+    deal.play(deal.legal_cards()[0])
+    assert bc.smart_choose_declare(deal) is True  # seat 1 has vierde, partner hasn't played
+    deal.play(deal.legal_cards()[0])
+    # Now seat 2 has derde, partner (0) didn't announce, opponent (1) announced vierde -> conceal!
+    assert deal.current_player == 2
+    assert deal.announced(1) and not deal.announced(0)
+    assert bc.smart_choose_declare(deal) is False

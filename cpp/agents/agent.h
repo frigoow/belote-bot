@@ -39,6 +39,11 @@ Bid ruleBid(const Deal& d, double threshold = 5.0);
 // Fast heuristic card play (used by RuleAgent and shared-world rollouts).
 int ruleChooseCard(const Deal& d);
 
+// Phase 3 Toon conceal gate (PLAN.md §4.3): conceals at trick 1 when an
+// opponent has already announced a strictly superior toon (kind / carré rank)
+// and partner has already played without matching or beating it.
+bool smartChooseDeclare(const Deal& d);
+
 // Uniformly random legal bids (taking with probability p_take) and cards.
 class RandomAgent : public Agent {
 public:

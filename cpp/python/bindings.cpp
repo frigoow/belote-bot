@@ -500,6 +500,7 @@ PYBIND11_MODULE(belote_cpp, m) {
     m.def("rule_hand_value", &ruleHandValue, py::arg("cards"), py::arg("trump"));
     m.def("rule_bid", &ruleBid, py::arg("deal"), py::arg("threshold") = 5.0);
     m.def("rule_choose_card", &ruleChooseCard, py::arg("deal"));
+    m.def("smart_choose_declare", &smartChooseDeclare, py::arg("deal"));
     m.def("config_summary", &configSummary, py::arg("config"));
 
     py::class_<DuelOptions>(m, "DuelOptions")

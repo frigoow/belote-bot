@@ -47,6 +47,43 @@ Bid ruleBid(const Deal& d, double threshold) {
     return best;
 }
 
+namespace {
+
+bool strictlyBeatsAnnouncement(const Announcement& opp, const Announcement& mine) {
+    if (int(opp.kind) > int(mine.kind)) return true;
+    if (opp.kind == ToonKind::kCarre && mine.kind == ToonKind::kCarre)
+        return kTrumpStrength[opp.carre_rank] > kTrumpStrength[mine.carre_rank];
+    return false;
+}
+
+}  // namespace
+
+bool smartChooseDeclare(const Deal& d) {
+    const int me = d.currentPlayer();
+    if (!d.canSetDeclare(me) || d.toons(me).empty()) return true;
+
+    const Trick& t = d.trick();
+    bool partner_played = false;
+    const int partner = partnerOf(me);
+    for (int i = 0; i < t.n; ++i)
+        if (t.players[i] == partner) partner_played = true;
+    if (!partner_played) return true;  // partner may still hold a winning toon
+
+    const Announcement my_ann = announcementOf(d.toons(me), d.trump());
+    const bool partner_ann = d.announced(partner);
+
+    for (int i = 0; i < t.n; ++i) {
+        const int p = t.players[i];
+        if (teamOf(p) == teamOf(me) || !d.announced(p)) continue;
+        const Announcement& opp_ann = d.announcement(p);
+        if (strictlyBeatsAnnouncement(opp_ann, my_ann) &&
+            (!partner_ann || strictlyBeatsAnnouncement(opp_ann, d.announcement(partner)))) {
+            return false;  // zero chance to win the toon comparison; avoid leaking
+        }
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------- random
 
 Bid RandomAgent::chooseBid(const Deal& d) {
