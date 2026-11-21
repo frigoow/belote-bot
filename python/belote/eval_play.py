@@ -72,13 +72,14 @@ def choose_cards_batch(
             valid[i, k] = True
 
     a_t = torch.from_numpy(actions).to(device)
+    v_t = torch.from_numpy(valid).to(device)
     if use_hist:
         h_t = torch.from_numpy(hists).to(device)
         np_t = torch.from_numpy(n_plies).to(device)
-        q = model(s_t, a_t, h_t, np_t)
+        q = model(s_t, a_t, h_t, np_t, valid_mask=v_t)
     else:
-        q = model(s_t, a_t)
-    q = q.masked_fill(~torch.from_numpy(valid).to(device), -1e9)
+        q = model(s_t, a_t, valid_mask=v_t)
+    q = q.masked_fill(~v_t, -1e9)
     best_idx = q.argmax(dim=-1).cpu().tolist()
     return [legal_lists[i][best_idx[i]] for i in range(n)]
 

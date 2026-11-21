@@ -1,6 +1,6 @@
 """Neural architectures for M2 Belgian Belote card play:
-- CardQMLP: fast split-trunk action-as-input Q-network (MLP sanity baseline).
-- CardQGRU: split-trunk action-as-input Q-network with chronological ply GRU.
+- CardQMLP: Dueling split-trunk action-as-input Q-network (V(s) + centered A(s, a)).
+- CardQGRU: Dueling action-as-input Q-GRU blueprint with chronological ply GRU.
 - BeliefNet: hidden-card distribution predictor B_phi(card -> rel_seat in {1,2,3}).
 - FastPolicy: compact 256x128 ReLU MLP distilled for ultra-fast C++ rollouts.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,8 +31,58 @@ class ResBlock(nn.Module):
         return F.silu(x + h)
 
 
+class DuelingQHead(nn.Module):
+    """Dueling V(s) + centered A(s, a) head over all K legal candidate actions.
+
+    Separating V(s) from A(s, a) is crucial in Belote: most of the return
+    variance comes from the state's nat cliff (V(s)), while relative card
+    choice is a much smaller zero-mean advantage A(s, a).
+    """
+
+    def __init__(self, trunk_dim: int, action_dim: int = ACTION_DIM, act_hidden: int = 128, adv_hidden: int = 256):
+        super().__init__()
+        self.v_head = nn.Sequential(
+            nn.Linear(trunk_dim, adv_hidden),
+            nn.LayerNorm(adv_hidden),
+            nn.SiLU(),
+            nn.Linear(adv_hidden, 1),
+        )
+        self.act_in = nn.Sequential(
+            nn.Linear(action_dim, act_hidden),
+            nn.LayerNorm(act_hidden),
+            nn.SiLU(),
+        )
+        self.adv_in = nn.Sequential(
+            nn.Linear(trunk_dim + act_hidden, adv_hidden),
+            nn.LayerNorm(adv_hidden),
+            nn.SiLU(),
+            ResBlock(adv_hidden),
+            nn.Linear(adv_hidden, 1),
+        )
+
+    def forward(
+        self,
+        trunk: torch.Tensor,
+        actions: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # trunk: (B, D), actions: (B, K, A), valid_mask: (B, K) bool
+        v = self.v_head(trunk)  # (B, 1)
+        b, k, _ = actions.shape
+        ae = self.act_in(actions)
+        te = trunk.unsqueeze(1).expand(b, k, -1)
+        adv = self.adv_in(torch.cat([te, ae], dim=-1)).squeeze(-1)  # (B, K)
+        if valid_mask is not None:
+            vm = valid_mask.to(adv.dtype)
+            denom = vm.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            mean_adv = (adv * vm).sum(dim=-1, keepdim=True) / denom
+        else:
+            mean_adv = adv.mean(dim=-1, keepdim=True)
+        return v + (adv - mean_adv)
+
+
 class CardQMLP(nn.Module):
-    """Split-trunk action-as-input Q-network: computes state trunk once per obs."""
+    """Dueling action-as-input Q-MLP."""
 
     def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM, hidden: int = 512):
         super().__init__()
@@ -44,16 +93,7 @@ class CardQMLP(nn.Module):
             nn.SiLU(),
             ResBlock(hidden),
         )
-        self.act_in = nn.Sequential(
-            nn.Linear(action_dim, 128),
-            nn.SiLU(),
-        )
-        self.head = nn.Sequential(
-            nn.Linear(hidden + 128, 256),
-            nn.LayerNorm(256),
-            nn.SiLU(),
-            nn.Linear(256, 1),
-        )
+        self.q_head = DuelingQHead(hidden, action_dim)
 
     def encode_trunk(
         self,
@@ -63,24 +103,15 @@ class CardQMLP(nn.Module):
     ) -> torch.Tensor:
         return self.state_in(state)
 
-    def score_actions(self, trunk: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        # actions: (B, action_dim) or (B, K, action_dim)
-        if actions.ndim == 2:
-            ae = self.act_in(actions)
-            return self.head(torch.cat([trunk, ae], dim=-1)).squeeze(-1)
-        b, k, _ = actions.shape
-        ae = self.act_in(actions)
-        te = trunk.unsqueeze(1).expand(b, k, -1)
-        return self.head(torch.cat([te, ae], dim=-1)).squeeze(-1)
-
     def forward(
         self,
         state: torch.Tensor,
         actions: torch.Tensor,
         history: torch.Tensor | None = None,
         n_plies: torch.Tensor | None = None,
+        valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.score_actions(self.encode_trunk(state), actions)
+        return self.q_head(self.encode_trunk(state), actions, valid_mask)
 
 
 class HistoryEncoder(nn.Module):
@@ -93,14 +124,13 @@ class HistoryEncoder(nn.Module):
         self.empty_emb = nn.Parameter(torch.zeros(hidden))
 
     def forward(self, history: torch.Tensor, n_plies: torch.Tensor) -> torch.Tensor:
-        # history: (B, T, ply_dim), n_plies: (B,) int64 in [0..T]
         bsz = history.shape[0]
         max_len = int(n_plies.max().item()) if bsz > 0 else 0
         if max_len == 0:
             return self.empty_emb.unsqueeze(0).expand(bsz, -1)
 
         trimmed = history[:, :max_len, :]
-        out, _ = self.gru(trimmed)  # (B, max_len, H)
+        out, _ = self.gru(trimmed)
         has_plies = n_plies > 0
         gather_idx = (n_plies - 1).clamp(min=0).long()
         picked = out[torch.arange(bsz, device=history.device), gather_idx]
@@ -109,7 +139,7 @@ class HistoryEncoder(nn.Module):
 
 
 class CardQGRU(nn.Module):
-    """Action-as-input Q-GRU blueprint (PLAN.md §3.1, M2)."""
+    """Dueling action-as-input Q-GRU blueprint (PLAN.md §3.1, M2)."""
 
     def __init__(
         self,
@@ -129,16 +159,7 @@ class CardQGRU(nn.Module):
         )
         self.hist_enc = HistoryEncoder(ply_dim, gru_hidden)
         self.trunk = ResBlock(trunk_dim)
-        self.act_in = nn.Sequential(
-            nn.Linear(action_dim, 128),
-            nn.SiLU(),
-        )
-        self.head = nn.Sequential(
-            nn.Linear(trunk_dim + 128, 256),
-            nn.LayerNorm(256),
-            nn.SiLU(),
-            nn.Linear(256, 1),
-        )
+        self.q_head = DuelingQHead(trunk_dim, action_dim)
 
     def encode_trunk(
         self,
@@ -150,23 +171,15 @@ class CardQGRU(nn.Module):
         he = self.hist_enc(history, n_plies)
         return self.trunk(torch.cat([se, he], dim=-1))
 
-    def score_actions(self, trunk: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        if actions.ndim == 2:
-            ae = self.act_in(actions)
-            return self.head(torch.cat([trunk, ae], dim=-1)).squeeze(-1)
-        b, k, _ = actions.shape
-        ae = self.act_in(actions)
-        te = trunk.unsqueeze(1).expand(b, k, -1)
-        return self.head(torch.cat([te, ae], dim=-1)).squeeze(-1)
-
     def forward(
         self,
         state: torch.Tensor,
         actions: torch.Tensor,
         history: torch.Tensor,
         n_plies: torch.Tensor,
+        valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.score_actions(self.encode_trunk(state, history, n_plies), actions)
+        return self.q_head(self.encode_trunk(state, history, n_plies), actions, valid_mask)
 
 
 class BeliefNet(nn.Module):
@@ -226,7 +239,6 @@ class FastPolicy(nn.Module):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as f:
-            # Magic "BFP1" + dims (state_dim, h1, h2, 32)
             f.write(b"BFP1")
             f.write(struct.pack("<4i", self.state_dim, self.h1, self.h2, 32))
             for layer in (self.fc1, self.fc2, self.fc3):

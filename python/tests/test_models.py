@@ -17,13 +17,13 @@ def test_q_models_forward_shapes():
     h = torch.from_numpy(batch["history"])
     np_t = torch.from_numpy(batch["n_plies"])
     a = torch.from_numpy(batch["legal_actions"])
+    nl = torch.from_numpy(batch["n_legal"])
+    valid = torch.arange(bc.MAX_LEGAL).unsqueeze(0) < nl.unsqueeze(1)
 
     for model in (CardQMLP(), CardQGRU()):
-        q_all = model(s, a, h, np_t)
+        q_all = model(s, a, h, np_t, valid_mask=valid)
         assert q_all.shape == (8, bc.MAX_LEGAL)
-        q_one = model(s, a[:, 0, :], h, np_t)
-        assert q_one.shape == (8,)
-        torch.testing.assert_close(q_all[:, 0], q_one, atol=1e-5, rtol=1e-5)
+        assert torch.all(torch.isfinite(q_all))
 
     bnet = BeliefNet()
     ba = torch.from_numpy(batch["belief_allowed"])
