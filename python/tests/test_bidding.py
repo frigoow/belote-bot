@@ -164,3 +164,27 @@ def test_bidding_pipeline_and_cpp_bbm1_parity(tmp_path):
             lp = cpp_bm.bid_log_prob(deal.hand(me), deal.blik, nk, cfg, cpp_ev.best_bid, us, them, pot, wd)
             assert np.isfinite(lp) and lp <= 1e-9
             deal.bid(bc.Bid.pass_())
+
+    # Smoke-test Stage 3 ordered-deck auction search and M4 bid+hybrid:me:auct match duel.
+    from belote.models import FastPolicy
+
+    fp = FastPolicy()
+    fp.eval()
+    fp_bin = tmp_path / "fast.bin"
+    fp.export_bin(fp_bin)
+    cpp_fp = bc.FastPolicyModel.load(str(fp_bin))
+    d_s3 = bc.Deal(cfg, 0, list(range(32)))
+    b_s3 = cpp_bm.choose_bid_search(d_s3, cpp_fp, 80, 75, 8, worlds=8, search_margin=1.0, seed=5)
+    assert b_s3 in d_s3.legal_bids()
+
+    opt = bc.MatchDuelOptions()
+    opt.a = f"bid:{bundle}:s3=4:m=0.05+hybrid:{fp_bin}:8:ab5:me:auct"
+    opt.b = "rule"
+    opt.bidder = "self"
+    opt.matches = 2
+    opt.seed = 1
+    opt.threads = 1
+    opt.config = cfg
+    res = bc.run_match_duel(opt)
+    assert res.pairs == 2
+    assert 0.0 <= res.win_rate <= 1.0

@@ -558,7 +558,8 @@ def main() -> None:
     )
 
     # 3. Fixed-point score-aware BidNet sweeps over stratified match states.
-    bn_opt = torch.optim.AdamW(bidnet.parameters(), lr=8e-4, weight_decay=2e-4)
+    bn_opt = torch.optim.AdamW(bidnet.parameters(), lr=5e-4, weight_decay=2e-4)
+    bn_sched = torch.optim.lr_scheduler.CosineAnnealingLR(bn_opt, T_max=max(1, args.sweeps), eta_min=5e-5)
     score_grid = [
         (0, 0, 0),
         (25, 25, 0),
@@ -584,6 +585,12 @@ def main() -> None:
         "table": table,
     }
 
+    # Accumulated replay buffer across sweeps (capped at 600k decisions) to prevent drift.
+    buf_af: list[np.ndarray] = []
+    buf_mc: list[np.ndarray] = []
+    buf_act: list[np.ndarray] = []
+    buf_tgt: list[np.ndarray] = []
+
     for sweep in range(1, args.sweeps + 1):
         t_s = time.perf_counter()
         AF, MC, ACT, TGT, X_sp, O_sp, emp_dist = collect_sweep_batched(
@@ -601,24 +608,36 @@ def main() -> None:
             threads=args.threads,
         )
 
+        buf_af.append(AF)
+        buf_mc.append(MC)
+        buf_act.append(ACT)
+        buf_tgt.append(TGT)
+        all_af = np.concatenate(buf_af, axis=0)[-600000:]
+        all_mc = np.concatenate(buf_mc, axis=0)[-600000:]
+        all_act = np.concatenate(buf_act, axis=0)[-600000:]
+        all_tgt = np.concatenate(buf_tgt, axis=0)[-600000:]
+
         bidnet.train()
         bn_losses = []
-        for _ep in range(6):
-            perm = rng.permutation(len(TGT))
-            for s in range(0, len(TGT), 1024):
+        n_ep = 4 if sweep > 1 else 5
+        for _ep in range(n_ep):
+            perm = rng.permutation(len(all_tgt))
+            for s in range(0, len(all_tgt), 1024):
                 idx = perm[s : s + 1024]
-                afb = torch.from_numpy(AF[idx]).to(device)
-                mcb = torch.from_numpy(MC[idx]).to(device)
-                ab = torch.from_numpy(ACT[idx]).to(device)
-                tb = torch.from_numpy(TGT[idx]).to(device)
+                afb = torch.from_numpy(all_af[idx]).to(device)
+                mcb = torch.from_numpy(all_mc[idx]).to(device)
+                ab = torch.from_numpy(all_act[idx]).to(device)
+                tb = torch.from_numpy(all_tgt[idx]).to(device)
+                deltas = bidnet.net(torch.cat([afb, mcb], dim=-1))
                 preds = bidnet(afb, mcb)
                 chosen_v = preds[torch.arange(len(idx), device=device), ab]
-                loss = F.mse_loss(chosen_v, tb)
+                loss = F.mse_loss(chosen_v, tb) + 5e-4 * (deltas ** 2).mean()
                 bn_opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(bidnet.parameters(), 2.0)
                 bn_opt.step()
                 bn_losses.append(float(loss.item()))
+        bn_sched.step()
 
         # Update MatchEquityTable V^(t+1) from non-exploratory BidNet self-play deals.
         if emp_dist.probs[0].size > 5 and emp_dist.probs[1].size > 5:
