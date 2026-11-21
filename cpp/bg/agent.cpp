@@ -152,7 +152,10 @@ struct Endgame {
         if (match_ctx.enabled) {
             const double eq0 = MatchEquityTable::instance().postDealEquity(
                 match_ctx.sn_before, match_ctx.ew_before, match_ctx.first_before, contract, r, 0);
-            return int(std::lround(eq0 * 10000.0));
+            // Zero-sum tie-breaker by deal margin when match equity saturates at 0.0 or 1.0!
+            // v0 in [-300, 9900], exact team-1 complement is 9600 - v0.
+            const int tie = std::clamp(r.sn - r.ew, -150, 150) * 2;
+            return int(std::lround(eq0 * 9600.0)) + tie;
         }
         return r.sn - r.ew;
     }
@@ -326,7 +329,7 @@ EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_c
         const int c = lowestCard(m);
         Endgame::State n = s;
         const int v0 = e.apply(n, c, chosen) ? e.terminal(n) : e.search(n, -kInf, kInf);
-        const int v = (team == 0) ? v0 : (match_ctx.enabled ? (10000 - v0) : -v0);
+        const int v = (team == 0) ? v0 : (match_ctx.enabled ? (9600 - v0) : -v0);
         score_by_card[c] = v;
         best = maxing_team ? std::max(best, v) : std::min(best, v);
     }
@@ -355,7 +358,7 @@ int solveEndgameValue(const Round& r, int team, const MatchContext& match_ctx) {
     Endgame e(r.contract(), r.contractPlayer(), r.hangingBefore(), tt_log2, match_ctx);
     const Endgame::State s = e.initState(r);
     const int v0 = e.search(s, -kInf, kInf);
-    return (team == 0) ? v0 : (match_ctx.enabled ? (10000 - v0) : -v0);
+    return (team == 0) ? v0 : (match_ctx.enabled ? (9600 - v0) : -v0);
 }
 
 // ================================================================== play-outs and search
@@ -371,7 +374,7 @@ double playOut(Round r, int team, int endgame_tricks, const BgFastPolicyModel* f
             case Round::Decision::kPlay:
                 if (endgame_tricks > 0 && r.trickNumber() >= 2 && r.trickNumber() > kTricks - endgame_tricks) {
                     const int v = solveEndgameValue(r, team, match_ctx);
-                    return match_ctx.enabled ? double(v) * 0.01 : double(v);
+                    return match_ctx.enabled ? double(v) / 96.0 : double(v);
                 }
                 r.play(use_fast ? fast_policy->chooseCard(r) : rulePolicy(r), true);
                 break;
@@ -380,9 +383,10 @@ double playOut(Round r, int team, int endgame_tricks, const BgFastPolicyModel* f
         }
     }
     if (match_ctx.enabled) {
-        return 100.0 * MatchEquityTable::instance().postDealEquity(
-                           match_ctx.sn_before, match_ctx.ew_before, match_ctx.first_before, r.contract(), r.result(),
-                           team);
+        const double eq = MatchEquityTable::instance().postDealEquity(
+            match_ctx.sn_before, match_ctx.ew_before, match_ctx.first_before, r.contract(), r.result(), team);
+        const int m = std::clamp(margin(r.result(), team), -150, 150);
+        return 100.0 * eq + double(m) * (2.0 / 96.0);
     }
     return margin(r.result(), team);
 }
@@ -616,7 +620,7 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
         for (std::size_t w = 0; w < nw; ++w) {
             if (exact) {
                 const EndgameResult er = solveEndgame(bases[w], team, match_ctx);
-                const double scale = match_ctx.enabled ? 0.01 : 1.0;
+                const double scale = match_ctx.enabled ? (1.0 / 96.0) : 1.0;
                 for (std::size_t i = 0; i < nm; ++i)
                     for (const auto& [c, v] : er.move_values)
                         if (c == moves[i]) val[i * nw + w] = double(v) * scale;
