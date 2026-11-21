@@ -181,15 +181,22 @@ def eval_belief_per_trick(
     device: torch.device,
     num_deals: int = 256,
     seed: int = 99999,
+    policy_model: torch.nn.Module | None = None,
 ) -> dict[str, object]:
-    """Compare BeliefNet per-trick cross-entropy log-loss vs constrained-uniform."""
+    """Compare BeliefNet per-trick cross-entropy log-loss vs constrained-uniform.
+
+    When `policy_model` is provided, steps validation deals with `policy_model`
+    (measuring in-distribution self-play belief accuracy); otherwise uses RuleAgent.
+    """
     belief_net.eval()
+    if policy_model is not None:
+        policy_model.eval()
     env = bc.BatchPlayEnv(num_envs=num_deals, config=bc.Config.belgian(), seed=seed, bid_jitter=0.0)
-    rng = np.random.default_rng(seed)
 
     model_loss_by_trick = np.zeros(8, dtype=np.float64)
     unif_loss_by_trick = np.zeros(8, dtype=np.float64)
     count_by_trick = np.zeros(8, dtype=np.int64)
+    idx_range = torch.arange(bc.MAX_LEGAL, device=device).unsqueeze(0)
 
     for ply in range(32):
         trick = ply // 4
@@ -217,12 +224,21 @@ def eval_belief_per_trick(
                 unif_loss_by_trick[trick] += float(np.log(n_allowed[amb]).sum())
                 count_by_trick[trick] += int(amb.sum())
 
-        # Play rule cards on validation deals to get realistic trick progression.
-        acts = np.empty(num_deals, dtype=np.int32)
-        lc = batch["legal_cards"]
-        for b in range(num_deals):
-            c = bc.rule_choose_card(env.deal(b))
-            acts[b] = int(np.where(lc[b] == c)[0][0])
+        if policy_model is not None:
+            la_t = torch.from_numpy(batch["legal_actions"]).to(device)
+            nl_t = torch.from_numpy(batch["n_legal"]).to(device)
+            valid = idx_range < nl_t.unsqueeze(1)
+            if getattr(policy_model, "arch", None) == "gru":
+                q = policy_model(s_t, la_t, h_t, np_t, valid_mask=valid)
+            else:
+                q = policy_model(s_t, la_t, valid_mask=valid)
+            acts = q.masked_fill(~valid, -1e9).argmax(dim=-1).cpu().numpy().astype(np.int32)
+        else:
+            acts = np.empty(num_deals, dtype=np.int32)
+            lc = batch["legal_cards"]
+            for b in range(num_deals):
+                c = bc.rule_choose_card(env.deal(b))
+                acts[b] = int(np.where(lc[b] == c)[0][0])
         env.step_batch(acts)
 
     per_trick = {}

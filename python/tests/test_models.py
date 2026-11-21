@@ -66,6 +66,14 @@ def test_choose_cards_and_fast_policy_export(tmp_path):
     hr = bc.hybrid_search(deals[0], cpp_fast, bc.HybridOptions(worlds=8, ab_handoff_trick=5, seed=1))
     assert hr.best_move in deals[0].legal_cards()
 
+    # Candidate racing + play_lik_temp determinism check.
+    opt_race = bc.HybridOptions(worlds=64, ab_handoff_trick=5, seed=7, race=True, race_min_worlds=16, race_step=8, race_z=2.0, play_lik_temp=1.5)
+    hr1 = bc.hybrid_search(deals[0], cpp_fast, opt_race)
+    hr2 = bc.hybrid_search(deals[0], cpp_fast, opt_race)
+    assert hr1.best_move in deals[0].legal_cards()
+    assert hr1.best_move == hr2.best_move
+    assert hr1.worlds_used == hr2.worlds_used
+
     bev = eval_belief_per_trick(BeliefNet(), device, num_deals=8, seed=3)
     assert bev["uniform_loss"] > 0.0
     assert bev["model_loss"] > 0.0

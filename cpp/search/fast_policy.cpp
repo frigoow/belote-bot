@@ -44,7 +44,9 @@ void sparseLinearOut(const float* in, int in_dim, const float* w_t, const float*
 void transposeRowMajor(const std::vector<float>& src, int rows, int cols, std::vector<float>& dst) {
     dst.resize(std::size_t(rows) * std::size_t(cols));
     for (int r = 0; r < rows; ++r)
-        for (int c = 0; c < cols; ++c) dst[std::size_t(c) * std::size_t(rows) + std::size_t(r)] = src[std::size_t(r) * std::size_t(cols) + std::size_t(c)];
+        for (int c = 0; c < cols; ++c)
+            dst[std::size_t(c) * std::size_t(rows) + std::size_t(r)] =
+                src[std::size_t(r) * std::size_t(cols) + std::size_t(c)];
 }
 
 std::mt19937_64& hybridRng() {
@@ -135,8 +137,7 @@ int FastPolicyModel::chooseCard(const Deal& deal) const {
     return best_card;
 }
 
-double FastPolicyModel::logProbOfPlay(const Observation& obs, int card) const {
-    // Reconstruct current trick to find legal moves at obs.
+double FastPolicyModel::logProbOfPlay(const Observation& obs, int card, double temperature) const {
     Trick cur;
     for (const Play& pl : obs.plays) {
         cur.cards[cur.n] = pl.card;
@@ -147,19 +148,21 @@ double FastPolicyModel::logProbOfPlay(const Observation& obs, int card) const {
     if (popcount(legal) <= 1) return 0.0;
     float logits[kCards];
     evalObservation(obs, logits);
-    float max_l = -std::numeric_limits<float>::infinity();
-    for (Mask m = legal; m; m &= m - 1) max_l = std::max(max_l, logits[canonCard(lowestCard(m), obs.trump)]);
+    const double inv_t = temperature > 0.0 ? (1.0 / temperature) : 1.0;
+    double max_l = -std::numeric_limits<double>::infinity();
+    for (Mask m = legal; m; m &= m - 1)
+        max_l = std::max(max_l, double(logits[canonCard(lowestCard(m), obs.trump)]) * inv_t);
     double sum_exp = 0.0;
     for (Mask m = legal; m; m &= m - 1)
-        sum_exp += std::exp(double(logits[canonCard(lowestCard(m), obs.trump)] - max_l));
-    const double chosen_l = double(logits[canonCard(card, obs.trump)] - max_l);
+        sum_exp += std::exp(double(logits[canonCard(lowestCard(m), obs.trump)]) * inv_t - max_l);
+    const double chosen_l = double(logits[canonCard(card, obs.trump)]) * inv_t - max_l;
     return chosen_l - std::log(sum_exp);
 }
 
 namespace {
 
 // Honest FastPolicy log-likelihood of the observed hidden-seat plays in world w.
-double playHistoryLogLik(const Observation& root_obs, const World& w, const FastPolicyModel& policy) {
+double playHistoryLogLik(const Observation& root_obs, const World& w, const FastPolicyModel& policy, double temp) {
     if (root_obs.plays.empty()) return 0.0;
     std::array<Mask, kPlayers> start{};
     for (int p = 0; p < kPlayers; ++p) start[p] = w.hands[p] | root_obs.playedBy(p);
@@ -172,7 +175,7 @@ double playHistoryLogLik(const Observation& root_obs, const World& w, const Fast
     double ll = 0.0;
     for (const Play& pl : root_obs.plays) {
         if (pl.player != root_obs.observer && popcount(d.legalMoves()) > 1) {
-            ll += policy.logProbOfPlay(observe(d, pl.player), pl.card);
+            ll += policy.logProbOfPlay(observe(d, pl.player), pl.card, temp);
         }
         d.play(pl.card);
     }
@@ -183,7 +186,7 @@ double playHistoryLogLik(const Observation& root_obs, const World& w, const Fast
 
 HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const HybridOptions& options) {
     if (deal.phase() != Phase::kPlay) throw std::logic_error("hybridSearch: deal is not in kPlay");
-    const Mask legal = deal.legalMoves();
+    Mask legal = deal.legalMoves();
     HybridResult res;
     if (popcount(legal) == 1) {
         res.best_move = lowestCard(legal);
@@ -193,80 +196,174 @@ HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const
 
     const int me = deal.currentPlayer();
     const int my_team = teamOf(me);
+    const int trump = deal.trump();
+    if (deal.config().belot_queen_first_forfeits) {
+        const Mask k_bit = bit(cardOf(trump, kK));
+        const Mask q_bit = bit(cardOf(trump, kQ));
+        if ((deal.hand(me) & (k_bit | q_bit)) == (k_bit | q_bit) && (legal & k_bit)) legal &= ~q_bit;
+    }
+
+    if (popcount(legal) == 1) {
+        res.best_move = lowestCard(legal);
+        res.move_values.push_back({res.best_move, 0.0});
+        return res;
+    }
+
     const Observation root_obs = observe(deal, me);
     const WorldSampler sampler(root_obs);
 
-    std::vector<World> worlds;
-    if (sampler.count() > 0 && sampler.count() <= std::uint64_t(options.worlds)) {
-        worlds = sampler.enumerate(std::uint64_t(options.worlds));
-        res.exact_enumeration = !worlds.empty();
-    }
-    if (worlds.empty()) {
-        std::mt19937_64 local_rng(options.seed);
-        std::mt19937_64& rng = options.seed ? local_rng : hybridRng();
-        worlds.reserve(std::size_t(options.worlds));
-        for (int i = 0; i < options.worlds; ++i) {
-            auto w = sampler.sample(rng, 500);
-            if (!w) w = sampler.sampleUnchecked(rng);
-            worlds.push_back(*w);
-        }
-    }
-
-    // Weight worlds by FastPolicy play-history log-likelihood (tempered slightly for robustness).
-    std::vector<double> weights(worlds.size(), 1.0);
-    if (options.weight_play_history && !root_obs.plays.empty() && worlds.size() > 1) {
-        std::vector<double> logw(worlds.size(), 0.0);
-        double max_lw = -std::numeric_limits<double>::infinity();
-        for (std::size_t i = 0; i < worlds.size(); ++i) {
-            logw[i] = playHistoryLogLik(root_obs, worlds[i], policy);
-            max_lw = std::max(max_lw, logw[i]);
-        }
-        double sum_w = 0.0;
-        for (std::size_t i = 0; i < worlds.size(); ++i) {
-            weights[i] = std::exp(std::max(-30.0, logw[i] - max_lw));
-            sum_w += weights[i];
-        }
-        if (sum_w > 0.0)
-            for (double& wt : weights) wt /= sum_w;
-    } else if (!worlds.empty()) {
-        const double inv = 1.0 / double(worlds.size());
-        std::fill(weights.begin(), weights.end(), inv);
-    }
-
     std::vector<int> moves;
     for (Mask m = legal; m; m &= m - 1) moves.push_back(lowestCard(m));
-    std::vector<double> sums(moves.size(), 0.0);
-    const bool use_ab = options.ab_handoff_trick >= 0 && deal.tricksPlayed() >= options.ab_handoff_trick;
+    const std::size_t n_moves = moves.size();
 
-    for (std::size_t wi = 0; wi < worlds.size(); ++wi) {
-        const double wt = weights[wi];
-        const Deal base = sampler.replay(worlds[wi]);
-        if (use_ab) {
-            const EndgameResult er = solveEndgame(base);
-            for (std::size_t i = 0; i < moves.size(); ++i) {
-                for (const auto& [c, val] : er.move_values) {
-                    if (c == moves[i]) {
-                        sums[i] += wt * double(val);
-                        break;
+    // Exact enumeration when total consistent worlds <= max budget (no racing needed).
+    std::vector<World> enum_worlds;
+    if (sampler.count() > 0 && sampler.count() <= std::uint64_t(options.worlds)) {
+        enum_worlds = sampler.enumerate(std::uint64_t(options.worlds));
+        res.exact_enumeration = !enum_worlds.empty();
+    }
+
+    std::mt19937_64 local_rng(options.seed);
+    std::mt19937_64& rng = options.seed ? local_rng : hybridRng();
+
+    const bool use_ab = options.ab_handoff_trick >= 0 && deal.tricksPlayed() >= options.ab_handoff_trick;
+    const bool use_race = options.race && !res.exact_enumeration && n_moves > 1;
+    const int max_w = res.exact_enumeration ? int(enum_worlds.size()) : options.worlds;
+    const int step_w = use_race ? std::max(8, options.race_step) : max_w;
+
+    // Track per-world unnormalized log-weights and per-move values so we can
+    // compute exact normalized weighted means & paired-difference SEs on the fly.
+    std::vector<double> logw;
+    std::vector<std::vector<double>> vals(n_moves);
+    std::vector<bool> alive(n_moves, true);
+    int alive_count = int(n_moves);
+    logw.reserve(std::size_t(max_w));
+    for (auto& v : vals) v.reserve(std::size_t(max_w));
+
+    int evaluated = 0;
+    while (evaluated < max_w && alive_count > 1) {
+        const int batch_n = std::min(step_w, max_w - evaluated);
+        for (int bi = 0; bi < batch_n; ++bi) {
+            World w;
+            if (res.exact_enumeration) {
+                w = enum_worlds[std::size_t(evaluated + bi)];
+            } else {
+                auto sw = sampler.sample(rng, 500);
+                if (!sw) sw = sampler.sampleUnchecked(rng);
+                w = *sw;
+            }
+            const double lw = (options.weight_play_history && !root_obs.plays.empty() && max_w > 1)
+                                  ? playHistoryLogLik(root_obs, w, policy, options.play_lik_temp)
+                                  : 0.0;
+            logw.push_back(lw);
+
+            const Deal base = sampler.replay(w);
+            if (use_ab) {
+                const EndgameResult er = solveEndgame(base);
+                for (std::size_t i = 0; i < n_moves; ++i) {
+                    double v = 0.0;
+                    for (const auto& [c, ev] : er.move_values) {
+                        if (c == moves[i]) {
+                            v = double(ev);
+                            break;
+                        }
                     }
+                    vals[i].push_back(v);
+                }
+            } else {
+                for (std::size_t i = 0; i < n_moves; ++i) {
+                    if (!alive[i]) {
+                        vals[i].push_back(0.0);
+                        continue;
+                    }
+                    Deal sim = base;
+                    sim.play(moves[i]);
+                    while (sim.phase() == Phase::kPlay) sim.play(policy.chooseCard(sim));
+                    vals[i].push_back(unitMargin(sim, my_team));
                 }
             }
-            continue;
         }
-        for (std::size_t i = 0; i < moves.size(); ++i) {
-            Deal sim = base;
-            sim.play(moves[i]);
-            while (sim.phase() == Phase::kPlay) sim.play(policy.chooseCard(sim));
-            sums[i] += wt * unitMargin(sim, my_team);
+        evaluated += batch_n;
+
+        if (!use_race || evaluated < options.race_min_worlds) continue;
+
+        // Compute normalized weights over the `evaluated` worlds seen so far.
+        double max_lw = -std::numeric_limits<double>::infinity();
+        for (int k = 0; k < evaluated; ++k) max_lw = std::max(max_lw, logw[std::size_t(k)]);
+        std::vector<double> wt(static_cast<std::size_t>(evaluated));
+        double sum_w = 0.0;
+        double sum_w2 = 0.0;
+        for (int k = 0; k < evaluated; ++k) {
+            wt[std::size_t(k)] = std::exp(std::max(-30.0, logw[std::size_t(k)] - max_lw));
+            sum_w += wt[std::size_t(k)];
+        }
+        for (double& x : wt) {
+            x /= sum_w;
+            sum_w2 += x * x;
+        }
+        const double ess = sum_w2 > 0.0 ? (1.0 / sum_w2) : double(evaluated);
+        if (ess < 12.0) continue;  // don't prune if effective sample size is too small
+
+        // Find current leader among alive moves.
+        std::size_t leader = 0;
+        double leader_mean = -std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < n_moves; ++i) {
+            if (!alive[i]) continue;
+            double mu = 0.0;
+            for (int k = 0; k < evaluated; ++k) mu += wt[std::size_t(k)] * vals[i][std::size_t(k)];
+            if (mu > leader_mean) {
+                leader_mean = mu;
+                leader = i;
+            }
+        }
+
+        // CRN paired-difference z-test against leader: prune if mean(d) > z * se(d).
+        const double denom = std::max(1e-9, 1.0 - sum_w2);
+        for (std::size_t i = 0; i < n_moves; ++i) {
+            if (!alive[i] || i == leader) continue;
+            double mean_d = 0.0;
+            for (int k = 0; k < evaluated; ++k) {
+                const double d = vals[leader][std::size_t(k)] - vals[i][std::size_t(k)];
+                mean_d += wt[std::size_t(k)] * d;
+            }
+            if (mean_d <= 0.0) continue;
+            double var_d = 0.0;
+            for (int k = 0; k < evaluated; ++k) {
+                const double d = vals[leader][std::size_t(k)] - vals[i][std::size_t(k)];
+                const double diff = d - mean_d;
+                var_d += wt[std::size_t(k)] * diff * diff;
+            }
+            // Unbiased Kish ESS variance of weighted mean: (var_d / (1 - sum(wt^2))) * sum(wt^2).
+            const double se_d = std::sqrt((var_d / denom) * sum_w2);
+            if (mean_d > options.race_z * se_d + 1e-9) {
+                alive[i] = false;
+                --alive_count;
+            }
         }
     }
 
-    res.worlds_used = int(worlds.size());
+    // Final weighted means over all evaluated worlds for alive moves (and prefix for pruned moves).
+    double max_lw = -std::numeric_limits<double>::infinity();
+    for (int k = 0; k < evaluated; ++k) max_lw = std::max(max_lw, logw[std::size_t(k)]);
+    std::vector<double> wt(static_cast<std::size_t>(evaluated));
+    double sum_w = 0.0;
+    for (int k = 0; k < evaluated; ++k) {
+        wt[std::size_t(k)] = std::exp(std::max(-30.0, logw[std::size_t(k)] - max_lw));
+        sum_w += wt[std::size_t(k)];
+    }
+    for (double& x : wt) x /= sum_w;
+
+    res.worlds_used = evaluated;
     double best = -std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < moves.size(); ++i) {
-        res.move_values.push_back({moves[i], sums[i]});
-        if (sums[i] > best) {
-            best = sums[i];
+    for (std::size_t i = 0; i < n_moves; ++i) {
+        double mu = -1e9;
+        if (alive[i]) {
+            mu = 0.0;
+            for (int k = 0; k < evaluated; ++k) mu += wt[std::size_t(k)] * vals[i][std::size_t(k)];
+        }
+        res.move_values.push_back({moves[i], mu});
+        if (alive[i] && mu > best) {
+            best = mu;
             res.best_move = moves[i];
         }
     }

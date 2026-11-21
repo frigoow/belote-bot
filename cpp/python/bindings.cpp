@@ -474,14 +474,22 @@ PYBIND11_MODULE(belote_cpp, m) {
         .def("choose_card", &FastPolicyModel::chooseCard, py::arg("deal"));
 
     py::class_<HybridOptions>(m, "HybridOptions")
-        .def(py::init([](int worlds, int ab_handoff_trick, bool weight_play_history, std::uint64_t seed) {
-                 return HybridOptions{worlds, ab_handoff_trick, weight_play_history, seed};
+        .def(py::init([](int worlds, int ab_handoff_trick, bool weight_play_history, double play_lik_temp, bool race,
+                         int race_min_worlds, int race_step, double race_z, std::uint64_t seed) {
+                 return HybridOptions{worlds,     ab_handoff_trick, weight_play_history, play_lik_temp, race,
+                                      race_min_worlds, race_step,   race_z,              seed};
              }),
              py::arg("worlds") = 64, py::arg("ab_handoff_trick") = 4, py::arg("weight_play_history") = true,
-             py::arg("seed") = 0)
+             py::arg("play_lik_temp") = 1.0, py::arg("race") = false, py::arg("race_min_worlds") = 24,
+             py::arg("race_step") = 16, py::arg("race_z") = 2.5, py::arg("seed") = 0)
         .def_readwrite("worlds", &HybridOptions::worlds)
         .def_readwrite("ab_handoff_trick", &HybridOptions::ab_handoff_trick)
         .def_readwrite("weight_play_history", &HybridOptions::weight_play_history)
+        .def_readwrite("play_lik_temp", &HybridOptions::play_lik_temp)
+        .def_readwrite("race", &HybridOptions::race)
+        .def_readwrite("race_min_worlds", &HybridOptions::race_min_worlds)
+        .def_readwrite("race_step", &HybridOptions::race_step)
+        .def_readwrite("race_z", &HybridOptions::race_z)
         .def_readwrite("seed", &HybridOptions::seed);
     py::class_<HybridResult>(m, "HybridResult")
         .def_readonly("best_move", &HybridResult::best_move)

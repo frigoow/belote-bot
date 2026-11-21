@@ -2,7 +2,7 @@
 
 // Compact 256x128 ReLU FastPolicy in plain C++ (no external runtime needed),
 // loaded from FastPolicy.export_bin() ("BFP1" flat FP32 format), plus the
-// M2 FastPolicy + WorldSampler + exact AB hybrid card-play search.
+// M2 FastPolicy + WorldSampler + Candidate Racing + exact AB hybrid search.
 
 #include "belote/deal.h"
 #include "belote/encoder.h"
@@ -36,7 +36,7 @@ public:
 
     // Log-probability of a specific card played at obs (masked softmax over legal moves),
     // used for FastPolicy play-history world weighting (PLAN.md §3.2).
-    double logProbOfPlay(const Observation& obs, int card) const;
+    double logProbOfPlay(const Observation& obs, int card, double temperature = 1.0) const;
 
 private:
     int state_dim_ = 0;
@@ -50,9 +50,14 @@ private:
 };
 
 struct HybridOptions {
-    int worlds = 64;
+    int worlds = 64;                 // max worlds (or fixed worlds if race == false)
     int ab_handoff_trick = 4;        // >= 0: exact AB endgame from this trick on
     bool weight_play_history = true; // weight sampled worlds by FastPolicy play likelihood
+    double play_lik_temp = 1.0;      // softmax temperature for play-history log-likelihood
+    bool race = false;               // Manille-style CRN paired-z candidate racing
+    int race_min_worlds = 24;        // minimum worlds before pruning candidates
+    int race_step = 16;              // evaluate this many worlds per racing round
+    double race_z = 2.5;             // prune move if leader beats it by > race_z * SE
     std::uint64_t seed = 0;
 };
 
@@ -65,7 +70,7 @@ struct HybridResult {
 };
 
 // Shared-world FastPolicy play-outs + optional FastPolicy play-history
-// likelihood weighting + optional exact AB endgame handoff.
+// likelihood weighting + optional CRN candidate racing + exact AB endgame.
 HybridResult hybridSearch(const Deal& deal, const FastPolicyModel& policy, const HybridOptions& options = {});
 
 }  // namespace belote

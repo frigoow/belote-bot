@@ -261,7 +261,13 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
             if (parts[i].rfind("ab", 0) == 0) o.ab_handoff_trick = std::stoi(parts[i].substr(2));
             else if (parts[i] == "noab") o.ab_handoff_trick = -1;
             else if (parts[i] == "nowt") o.weight_play_history = false;
-            else throw std::invalid_argument("unknown hybrid option: " + parts[i]);
+            else if (parts[i] == "race") o.race = true;
+            else if (parts[i].rfind("z", 0) == 0) {
+                o.race = true;
+                o.race_z = std::stod(parts[i].substr(1));
+            } else if (parts[i].rfind("t", 0) == 0) {
+                o.play_lik_temp = std::stod(parts[i].substr(1));
+            } else throw std::invalid_argument("unknown hybrid option: " + parts[i]);
         }
         return std::make_unique<HybridAgent>(loadCached(parts[0]), o, spec, seed);
     }

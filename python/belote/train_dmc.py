@@ -261,7 +261,9 @@ def main() -> None:
     ap.add_argument("--train-belief", action="store_true")
     ap.add_argument("--belief-every", type=int, default=4, help="Train BeliefNet every N rounds")
     ap.add_argument("--distill-fast", action="store_true")
-    ap.add_argument("--distill-deals", type=int, default=50000)
+    ap.add_argument("--distill-only", action="store_true", help="Skip Q training and only distill FastPolicy from --resume")
+    ap.add_argument("--distill-deals", type=int, default=60000)
+    ap.add_argument("--distill-temp", type=float, default=0.04, help="Softmax temperature for Q->FastPolicy distillation")
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--save", type=Path, default=Path("checkpoints/q_gru.pt"))
@@ -290,6 +292,33 @@ def main() -> None:
 
     total_rounds = max(1, args.episodes // args.envs)
     q_sched = torch.optim.lr_scheduler.CosineAnnealingLR(q_opt, T_max=total_rounds, eta_min=args.lr * 0.05)
+    b_sched = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(b_opt, T_max=max(1, total_rounds // args.belief_every), eta_min=5e-5)
+        if b_opt
+        else None
+    )
+
+    if args.distill_only:
+        fast_bin = args.save.with_suffix(".fast.bin")
+        fast = distill_fast_policy(
+            q_model,
+            device=device,
+            num_deals=args.distill_deals,
+            batch_envs=min(512, args.envs),
+            temperature=args.distill_temp,
+            save_bin=fast_bin,
+        )
+        ev_fast = eval_vs_cpp_agent(fast, "rule", decks=args.eval_decks, device=device)
+        print(
+            f"FastPolicy (256x128, T={args.distill_temp}) vs rule: {ev_fast['units']:+.2f}±{ev_fast['units_ci95']:.2f}u "
+            f"({ev_fast['raw']:+.1f}±{ev_fast['raw_ci95']:.1f} raw pts)",
+            flush=True,
+        )
+        torch.save(
+            {"encoder_version": bc.ENCODER_VERSION, "fast_state_dict": fast.state_dict()},
+            args.save.with_suffix(".fast.pt"),
+        )
+        return
 
     env = bc.BatchPlayEnv(
         num_envs=args.envs,
@@ -388,11 +417,13 @@ def main() -> None:
                     loss.backward()
                     nn.utils.clip_grad_norm_(belief_net.parameters(), 2.0)
                     b_opt.step()
+            if b_sched is not None:
+                b_sched.step()
 
         if episodes_done >= next_eval or rnd == total_rounds:
             elapsed = time.perf_counter() - t_start
             ev_rule = eval_vs_cpp_agent(q_model, "rule", decks=args.eval_decks, device=device)
-            ev_roll = eval_vs_cpp_agent(q_model, "rollout:32", decks=min(150, args.eval_decks), device=device)
+            ev_roll = eval_vs_cpp_agent(q_model, "rollout:32", decks=args.eval_decks, device=device)
             msg = (
                 f"[{episodes_done:7d} deals | {elapsed:5.1f}s | {episodes_done / elapsed:5.0f} d/s | "
                 f"eps={eps:.3f} | mse={ema_q_loss:.4f}] "
@@ -400,8 +431,12 @@ def main() -> None:
                 f"vs rollout:32: {ev_roll['units']:+.2f}±{ev_roll['units_ci95']:.2f}u"
             )
             if belief_net is not None:
-                bev = eval_belief_per_trick(belief_net, device, num_deals=128)
-                msg += f" | B_phi CE={bev['model_loss']:.4f} (unif={bev['uniform_loss']:.4f})"
+                bev_self = eval_belief_per_trick(belief_net, device, num_deals=128, policy_model=q_model)
+                bev_rule = eval_belief_per_trick(belief_net, device, num_deals=128)
+                msg += (
+                    f" | B_phi self={bev_self['model_loss']:.4f}/{bev_self['uniform_loss']:.4f}"
+                    f" rule={bev_rule['model_loss']:.4f}/{bev_rule['uniform_loss']:.4f}"
+                )
             print(msg, flush=True)
 
             # Track best checkpoint by rollout:32 margin (tighter discrimination once above rule).
@@ -447,6 +482,7 @@ def main() -> None:
             device=device,
             num_deals=args.distill_deals,
             batch_envs=min(512, args.envs),
+            temperature=args.distill_temp,
             save_bin=fast_bin,
         )
         ev_fast = eval_vs_cpp_agent(fast, "rule", decks=args.eval_decks, device=device)
