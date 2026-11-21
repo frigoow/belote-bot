@@ -344,23 +344,25 @@ private:
     std::uint32_t gen_ = 0;
 };
 
-}  // namespace
-
-EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
-    if (deal.phase() != Phase::kPlay) throw std::logic_error("solveEndgame: deal is not in kPlay");
-
-    RootScoring sc;
+void initEndgameRoot(const Deal& deal, EndgameObjective objective, RootScoring& sc, State& root) {
     sc.cfg = deal.config();
     sc.takers = deal.takers();
     sc.trump = deal.trump();
     sc.belot_holder = deal.belotHolder();
-    sc.objective = options.objective;
+    sc.objective = objective;
 
-    // Precompute all toon totals once at the root (exact for every trick 0..7).
+    // Precompute all toon totals once at the root (exact for every trick 0..7,
+    // including mandatory declaring when toon_optional == false).
     std::vector<Toon> announced[kPlayers];
+    const Trick& t0 = deal.trick();
     for (int p = 0; p < kPlayers; ++p) {
+        bool played_first = deal.tricksPlayed() > 0;
+        if (!played_first) {
+            for (int i = 0; i < t0.n; ++i)
+                if (t0.players[i] == p) played_first = true;
+        }
         bool will_announce = deal.announced(p);
-        if (!will_announce && deal.canSetDeclare(p) && deal.declares(p) && !deal.toons(p).empty())
+        if (!will_announce && !played_first && sc.cfg.toon_enabled && deal.declares(p) && !deal.toons(p).empty())
             will_announce = true;
         if (will_announce) {
             announced[p] = deal.toons(p);
@@ -369,7 +371,6 @@ EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
     }
     sc.normal_toon_team = toonWinningTeam(announced, deal.trump(), deal.dealer());
 
-    State root;
     const Zobrist& z = zobrist();
     for (int p = 0; p < kPlayers; ++p) {
         root.hands[p] = deal.hand(p);
@@ -385,6 +386,16 @@ EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
         !(root.hands[sc.belot_holder] & bit(cardOf(sc.trump, kQ)))) {
         root.belot_forfeited = true;
     }
+}
+
+}  // namespace
+
+EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
+    if (deal.phase() != Phase::kPlay) throw std::logic_error("solveEndgame: deal is not in kPlay");
+
+    RootScoring sc;
+    State root;
+    initEndgameRoot(deal, options.objective, sc, root);
 
     Solver solver(sc, options.tt_log2);
     const Mask legal = legalMask(root.hands[root.current], root.trick, sc.trump, root.current, sc.cfg);
@@ -428,6 +439,17 @@ EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options) {
     res.value = best_score;
     res.nodes = solver.nodes;
     return res;
+}
+
+int evaluateEndgameLine(const Deal& deal, const std::vector<int>& cards, EndgameObjective objective) {
+    if (deal.phase() != Phase::kPlay) throw std::logic_error("evaluateEndgameLine: deal is not in kPlay");
+    RootScoring sc;
+    State st;
+    initEndgameRoot(deal, objective, sc, st);
+    Solver solver(sc, 8);
+    for (int card : cards) st = solver.apply(st, card);
+    if (st.tricks_played != kTricks) throw std::logic_error("evaluateEndgameLine: line did not finish deal");
+    return sc.evalLeaf(st.card_points, st.tricks_won, st.belot_announced);
 }
 
 }  // namespace belote

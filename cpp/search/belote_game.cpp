@@ -2,6 +2,8 @@
 
 #include "belote/match.h"
 
+#include <ismcts/utility.h>
+
 #include <random>
 
 namespace belote {
@@ -17,12 +19,20 @@ thread_local long fallback_count = 0;
 
 }  // namespace
 
-BeloteGame::BeloteGame(Deal deal, std::shared_ptr<const WorldSampler> sampler)
-    : deal_(std::move(deal)), sampler_(std::move(sampler)) {}
+BeloteGame::BeloteGame(Deal deal, std::shared_ptr<const WorldSampler> sampler,
+                       std::shared_ptr<std::mt19937_64> rng, std::uint64_t prng_seed)
+    : deal_(std::move(deal)), sampler_(std::move(sampler)), rng_(std::move(rng)), prng_seed_(prng_seed) {}
 
 long BeloteGame::fallbacks() { return fallback_count; }
 
 ISMCTS::Game<int>::Clone BeloteGame::cloneAndRandomise(Player observer) const {
+    // ISMCTS::Sequential executes on a std::async thread, so seed ISMCTS::prng()
+    // on the first determinization inside that worker thread.
+    if (prng_seed_ != 0 && !prng_seeded_) {
+        ISMCTS::prng().seed(static_cast<std::mt19937::result_type>(
+            prng_seed_ ^ (prng_seed_ >> 32) ^ 0x9E3779B9u));
+        prng_seeded_ = true;
+    }
     std::shared_ptr<const WorldSampler> local;
     const WorldSampler* sampler = sampler_.get();
     const int played = deal_.tricksPlayed() * kPlayers + deal_.trick().n;
@@ -31,7 +41,7 @@ ISMCTS::Game<int>::Clone BeloteGame::cloneAndRandomise(Player observer) const {
         local = std::make_shared<WorldSampler>(observe(deal_, int(observer)));
         sampler = local.get();
     }
-    auto& rng = threadRng();
+    auto& rng = rng_ ? *rng_ : threadRng();
     std::optional<World> world = sampler->sample(rng, 500);
     if (!world) {
         // Every per-card admissible world replays legally; only the toon

@@ -213,7 +213,7 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
         const auto colon = rest.find(':');
         o.iterations = unsigned(std::stoul(rest.substr(0, colon)));
         if (colon != std::string::npos) o.threads = unsigned(std::stoul(rest.substr(colon + 1)));
-        return std::make_unique<IsmctsAgent>(o);
+        return std::make_unique<IsmctsAgent>(o, seed);
     }
     if (spec.rfind("rollout:", 0) == 0) {
         RolloutOptions o;
@@ -225,7 +225,7 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
             if (tail.rfind("ab", 0) == 0) o.ab_handoff_trick = std::stoi(tail.substr(2));
             else throw std::invalid_argument("unknown rollout option: " + tail);
         }
-        return std::make_unique<RolloutAgent>(o);
+        return std::make_unique<RolloutAgent>(o, seed);
     }
     auto loadCached = [](const std::string& path) -> std::shared_ptr<const FastPolicyModel> {
         static std::mutex mu;
@@ -263,7 +263,7 @@ std::unique_ptr<Agent> makeAgent(const std::string& spec, std::uint64_t seed) {
             else if (parts[i] == "nowt") o.weight_play_history = false;
             else throw std::invalid_argument("unknown hybrid option: " + parts[i]);
         }
-        return std::make_unique<HybridAgent>(loadCached(parts[0]), o, spec);
+        return std::make_unique<HybridAgent>(loadCached(parts[0]), o, spec, seed);
     }
     throw std::invalid_argument("unknown agent: " + spec);
 }

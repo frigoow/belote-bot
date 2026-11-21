@@ -140,6 +140,144 @@ void testEndgameExact() {
                 checked, ms / kBench, double(total_nodes) / kBench);
 }
 
+void testEndgameEarlyScoring() {
+    // Verifies early-deal endgame root setup (tricks 0-3): mandatory toon
+    // announcing (toon_optional=false), optional announcing, pending show
+    // (toon_show_trick=1/3, toon_losers_show=true/false), and belot_forfeited
+    // at root after trump Q played before K under wikibooks().
+    std::mt19937_64 rng(88);
+    Config mand = Config::belgian();
+    mand.toon_optional = false;
+    Config losers = Config::belgian();
+    losers.toon_losers_show = true;
+    Config early_show = Config::belgian();
+    early_show.toon_show_trick = 1;
+    early_show.toon_optional = false;
+    early_show.carre_low_points = 50;
+    const std::vector<Config> cfgs = {Config::belgian(), Config::wikibooks(), Config::tanguyCompat(),
+                                      mand, losers, early_show};
+
+    int checked = 0;
+    for (const Config& cfg : cfgs) {
+        const EndgameObjective obj =
+            cfg.score_mode == ScoreMode::kRaw ? EndgameObjective::kRaw : EndgameObjective::kUnits;
+        for (int i = 0; i < 80; ++i) {
+            // Stop at tricks 0..3 (0 to 13 cards already played).
+            const int stop_cards = int(rng() % 14);
+            Deal d = randomPlayDeal(rng, stop_cards, cfg);
+            if (d.phase() != Phase::kPlay) continue;
+
+            // Play a random legal continuation to completion through Deal.
+            Deal sim = d;
+            std::vector<int> line;
+            RandomAgent ply(rng());
+            while (sim.phase() == Phase::kPlay) {
+                const int c = ply.chooseCard(sim);
+                line.push_back(c);
+                sim.play(c);
+            }
+            const int truth = (obj == EndgameObjective::kRaw)
+                                  ? (sim.result().credited[0] - sim.result().credited[1])
+                                  : (recordDeal(sim.result(), cfg).scores[0] - recordDeal(sim.result(), cfg).scores[1]);
+            const int got = evaluateEndgameLine(d, line, obj);
+            CHECK_EQ(got, truth);
+            ++checked;
+        }
+    }
+
+    // Explicit regression: trick 0 with toon_optional=false (seat 1 has a vierde
+    // and hasn't played yet) + wikibooks belot_forfeited at root (Q played first).
+    {
+        const std::array<Mask, kPlayers> hands = {
+            parseCards("7H 8H 9H 10H JH QH KH AH"), parseCards("7C 8C 9C 10C JC QC KC AC"),
+            parseCards("7D 8D 9D 10D JD QD KD AD"), parseCards("7S 8S 9S 10S JS QS KS AS")};
+        // 1) Mandatory declaring at trick 0 (after only seat 0 played):
+        Deal d_mand = Deal::fromPlay(mand, 3, 0, kHearts, hands);
+        d_mand.play(parseCard("7H"));  // seat 0 played; seats 1,2,3 haven't played yet
+        Deal sim = d_mand;
+        std::vector<int> line;
+        while (sim.phase() == Phase::kPlay) {
+            const int c = lowestCard(sim.legalMoves());
+            line.push_back(c);
+            sim.play(c);
+        }
+        const RecordedDeal rec = recordDeal(sim.result(), mand);
+        CHECK_EQ(evaluateEndgameLine(d_mand, line, EndgameObjective::kUnits), rec.scores[0] - rec.scores[1]);
+
+        // 2) Wikibooks belot forfeited BEFORE endgame root (Q played first):
+        Deal d_wb = Deal::fromPlay(Config::wikibooks(), 3, 0, kHearts, hands);
+        d_wb.play(parseCard("QH"));  // forfeits belot!
+        Deal sim_wb = d_wb;
+        std::vector<int> line_wb;
+        while (sim_wb.phase() == Phase::kPlay) {
+            const int c = lowestCard(sim_wb.legalMoves());
+            line_wb.push_back(c);
+            sim_wb.play(c);
+        }
+        CHECK_EQ(sim_wb.result().belot_team, -1);
+        const RecordedDeal rec_wb = recordDeal(sim_wb.result(), Config::wikibooks());
+        CHECK_EQ(evaluateEndgameLine(d_wb, line_wb, EndgameObjective::kUnits), rec_wb.scores[0] - rec_wb.scores[1]);
+    }
+    std::printf("endgame early-deal scoring: %d lines matched Deal::play()\n", checked);
+}
+
+void testConfigSummaryComplete() {
+    const Config base = Config::belgian();
+    const std::string base_s = configSummary(base);
+    auto checkDiff = [&](auto mutate) {
+        Config c = base;
+        mutate(c);
+        CHECK(configSummary(c) != base_s);
+    };
+    checkDiff([](Config& c) { c.redeal_next_dealer = !c.redeal_next_dealer; });
+    checkDiff([](Config& c) { c.round2_allow_blik_suit = !c.round2_allow_blik_suit; });
+    checkDiff([](Config& c) { c.trump_lead_partner_must_overtrump = !c.trump_lead_partner_must_overtrump; });
+    checkDiff([](Config& c) { c.must_undertrump = !c.must_undertrump; });
+    checkDiff([](Config& c) { c.toon_enabled = !c.toon_enabled; });
+    checkDiff([](Config& c) { c.carre_low_points = 50; });
+    checkDiff([](Config& c) { c.toon_optional = !c.toon_optional; });
+    checkDiff([](Config& c) { c.toon_show_trick = 1; });
+    checkDiff([](Config& c) { c.toon_losers_show = !c.toon_losers_show; });
+    checkDiff([](Config& c) { c.belot_queen_first_forfeits = !c.belot_queen_first_forfeits; });
+    checkDiff([](Config& c) { c.tie_rule = TieRule::kTakersMake; });
+    checkDiff([](Config& c) { c.score_mode = ScoreMode::kUnits; });
+    checkDiff([](Config& c) { c.ronde_points = 250; });
+    checkDiff([](Config& c) { c.match_target = 1001; });
+    checkDiff([](Config& c) { c.match_win_margin = 0; });
+}
+
+void testSearchReproducibility() {
+    for (const char* spec : {"rollout:16", "ismcts:60"}) {
+        DuelOptions o1;
+        o1.a = spec;
+        o1.b = "rule";
+        o1.deals = 24;
+        o1.seed = 42;
+        o1.threads = 1;
+        DuelOptions o4 = o1;
+        o4.threads = 4;
+        const DuelResult r1 = runDuel(o1);
+        const DuelResult r4 = runDuel(o4);
+        CHECK_EQ(r1.decks, r4.decks);
+        CHECK_EQ(r1.units, r4.units);
+        CHECK_EQ(r1.raw, r4.raw);
+    }
+    // Also verify MatchDuel reproducibility across thread counts.
+    MatchDuelOptions m1;
+    m1.a = "rollout:8";
+    m1.b = "rule";
+    m1.matches = 8;
+    m1.seed = 77;
+    m1.threads = 1;
+    MatchDuelOptions m4 = m1;
+    m4.threads = 4;
+    const MatchDuelResult mr1 = runMatchDuel(m1);
+    const MatchDuelResult mr4 = runMatchDuel(m4);
+    CHECK_EQ(mr1.win_rate, mr4.win_rate);
+    CHECK_EQ(mr1.score_margin, mr4.score_margin);
+    std::printf("reproducibility: rollout & ismcts identical across 1 vs 4 threads\n");
+}
+
 void testHarnessModes() {
     // 1. Card-play ladder sanity.
     DuelOptions o;
@@ -201,6 +339,9 @@ int main() {
     testDeterminizations();
     testSearchMoves();
     testEndgameExact();
+    testEndgameEarlyScoring();
+    testConfigSummaryComplete();
+    testSearchReproducibility();
     testHarnessModes();
     return checkResult("test_search");
 }

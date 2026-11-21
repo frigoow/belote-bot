@@ -23,6 +23,8 @@ class Agent {
 public:
     virtual ~Agent() = default;
     virtual std::string name() const = 0;
+    // Reset any internal RNG for reproducible evaluations (no-op for stateless agents).
+    virtual void reseed(std::uint64_t) {}
     // Phase kBid1/kBid2, the agent's turn.
     virtual Bid chooseBid(const Deal& d) = 0;
     // Before the agent's first card (only asked when the choice is open).
@@ -49,6 +51,7 @@ class RandomAgent : public Agent {
 public:
     explicit RandomAgent(std::uint64_t seed, double p_take = 0.3) : rng_(seed), p_take_(p_take) {}
     std::string name() const override { return "random"; }
+    void reseed(std::uint64_t seed) override { rng_.seed(seed); }
     Bid chooseBid(const Deal& d) override;
     int chooseCard(const Deal& d) override;
 
@@ -69,30 +72,58 @@ public:
 // SO-ISMCTS card play over sampled worlds; bids with the rule bidder.
 class IsmctsAgent : public Agent {
 public:
-    explicit IsmctsAgent(IsmctsOptions options) : options_(options) {}
+    explicit IsmctsAgent(IsmctsOptions options, std::uint64_t seed = 0)
+        : options_(options), rng_(seed), seeded_(seed != 0) {}
     std::string name() const override { return "ismcts:" + std::to_string(options_.iterations); }
+    void reseed(std::uint64_t seed) override {
+        rng_.seed(seed);
+        seeded_ = seed != 0;
+    }
     Bid chooseBid(const Deal& d) override { return ruleBid(d); }
-    int chooseCard(const Deal& d) override { return ismctsSearch(d, options_).best_move; }
+    int chooseCard(const Deal& d) override {
+        IsmctsOptions o = options_;
+        if (seeded_) {
+            o.seed = rng_();
+            if (o.seed == 0) o.seed = 1;
+        }
+        return ismctsSearch(d, o).best_move;
+    }
 
 private:
     IsmctsOptions options_;
+    std::mt19937_64 rng_;
+    bool seeded_ = false;
 };
 
 // Shared-world heuristic rollout card play (with optional exact AB endgame);
 // bids with the rule bidder.
 class RolloutAgent : public Agent {
 public:
-    explicit RolloutAgent(RolloutOptions options) : options_(options) {}
+    explicit RolloutAgent(RolloutOptions options, std::uint64_t seed = 0)
+        : options_(options), rng_(seed), seeded_(seed != 0) {}
     std::string name() const override {
         std::string n = "rollout:" + std::to_string(options_.worlds);
         if (options_.ab_handoff_trick >= 0) n += ":ab" + std::to_string(options_.ab_handoff_trick);
         return n;
     }
+    void reseed(std::uint64_t seed) override {
+        rng_.seed(seed);
+        seeded_ = seed != 0;
+    }
     Bid chooseBid(const Deal& d) override { return ruleBid(d); }
-    int chooseCard(const Deal& d) override { return rolloutSearch(d, options_).best_move; }
+    int chooseCard(const Deal& d) override {
+        RolloutOptions o = options_;
+        if (seeded_) {
+            o.seed = rng_();
+            if (o.seed == 0) o.seed = 1;
+        }
+        return rolloutSearch(d, o).best_move;
+    }
 
 private:
     RolloutOptions options_;
+    std::mt19937_64 rng_;
+    bool seeded_ = false;
 };
 
 // Direct greedy FastPolicy card play; bids with the rule bidder.
@@ -112,16 +143,30 @@ private:
 // FastPolicy + WorldSampler + play-history weighting + exact AB endgame hybrid.
 class HybridAgent : public Agent {
 public:
-    HybridAgent(std::shared_ptr<const FastPolicyModel> model, HybridOptions options, std::string label)
-        : model_(std::move(model)), options_(options), name_(std::move(label)) {}
+    HybridAgent(std::shared_ptr<const FastPolicyModel> model, HybridOptions options, std::string label,
+                std::uint64_t seed = 0)
+        : model_(std::move(model)), options_(options), name_(std::move(label)), rng_(seed), seeded_(seed != 0) {}
     std::string name() const override { return name_; }
+    void reseed(std::uint64_t seed) override {
+        rng_.seed(seed);
+        seeded_ = seed != 0;
+    }
     Bid chooseBid(const Deal& d) override { return ruleBid(d); }
-    int chooseCard(const Deal& d) override { return hybridSearch(d, *model_, options_).best_move; }
+    int chooseCard(const Deal& d) override {
+        HybridOptions o = options_;
+        if (seeded_) {
+            o.seed = rng_();
+            if (o.seed == 0) o.seed = 1;
+        }
+        return hybridSearch(d, *model_, o).best_move;
+    }
 
 private:
     std::shared_ptr<const FastPolicyModel> model_;
     HybridOptions options_;
     std::string name_;
+    std::mt19937_64 rng_;
+    bool seeded_ = false;
 };
 
 // "random", "rule", "ismcts:<iterations>[:<threads>]",

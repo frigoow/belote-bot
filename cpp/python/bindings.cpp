@@ -411,10 +411,13 @@ PYBIND11_MODULE(belote_cpp, m) {
 
     // ------------------------------------------------------------ search
     py::class_<IsmctsOptions>(m, "IsmctsOptions")
-        .def(py::init([](unsigned iterations, unsigned threads) { return IsmctsOptions{iterations, threads}; }),
-             py::arg("iterations") = 1000, py::arg("threads") = 1)
+        .def(py::init([](unsigned iterations, unsigned threads, std::uint64_t seed) {
+                 return IsmctsOptions{iterations, threads, seed};
+             }),
+             py::arg("iterations") = 1000, py::arg("threads") = 1, py::arg("seed") = 0)
         .def_readwrite("iterations", &IsmctsOptions::iterations)
-        .def_readwrite("threads", &IsmctsOptions::threads);
+        .def_readwrite("threads", &IsmctsOptions::threads)
+        .def_readwrite("seed", &IsmctsOptions::seed);
     py::class_<SearchResult>(m, "SearchResult")
         .def_readonly("best_move", &SearchResult::best_move)
         .def_readonly("visits", &SearchResult::visits)

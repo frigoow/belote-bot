@@ -47,12 +47,15 @@ SearchResult ismctsSearch(const Deal& deal, const IsmctsOptions& options) {
         return r;
     }
     auto sampler = std::make_shared<const WorldSampler>(observe(deal, deal.currentPlayer()));
-    const BeloteGame root(deal, sampler);
     if (options.threads <= 1) {
+        std::shared_ptr<std::mt19937_64> rng;
+        if (options.seed != 0) rng = std::make_shared<std::mt19937_64>(options.seed);
+        const BeloteGame root(deal, sampler, rng, options.seed);
         ISMCTS::SOSolver<int> solver(options.iterations);
         solver(root);
         return collect(solver.currentTrees());
     }
+    const BeloteGame root(deal, sampler);
     ISMCTS::SOSolver<int, ISMCTS::RootParallel> solver(options.iterations, options.threads);
     solver(root);
     return collect(solver.currentTrees());

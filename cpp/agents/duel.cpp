@@ -37,13 +37,17 @@ std::string configSummary(const Config& c) {
     std::ostringstream os;
     os << "target=" << c.match_target << ",margin=" << c.match_win_margin
        << ",score=" << scoreStr(c.score_mode) << ",tie=" << tieStr(c.tie_rule)
+       << ",ronde=" << c.ronde_points
+       << ",redeal_next=" << (c.redeal_next_dealer ? 1 : 0)
+       << ",r2_blik=" << (c.round2_allow_blik_suit ? 1 : 0)
+       << ",partner_over=" << (c.trump_lead_partner_must_overtrump ? 1 : 0)
        << ",undertrump=" << (c.must_undertrump ? 1 : 0)
        << ",belot_q_forf=" << (c.belot_queen_first_forfeits ? 1 : 0)
        << ",toon=" << (c.toon_enabled ? 1 : 0)
+       << "/low=" << c.carre_low_points
        << "/opt=" << (c.toon_optional ? 1 : 0)
        << "/show=" << c.toon_show_trick
-       << "/losers=" << (c.toon_losers_show ? 1 : 0)
-       << ",redeal_next=" << (c.redeal_next_dealer ? 1 : 0);
+       << "/losers=" << (c.toon_losers_show ? 1 : 0);
     return os.str();
 }
 
@@ -158,23 +162,37 @@ DuelResult runDuel(const DuelOptions& o) {
         std::unique_ptr<Agent> partner = o.partner.empty() ? nullptr : makeAgent(o.partner, base + 5);
 
         for (int i; (i = next.fetch_add(1)) < o.deals;) {
-            const auto deck = shuffledDeck(o.seed * 1000003ull + std::uint64_t(i));
+            const std::uint64_t deck_seed = o.seed * 1000003ull + std::uint64_t(i);
+            const auto deck = shuffledDeck(deck_seed);
             const int dealer = i % kPlayers;
             const int partner_slot = (i / kPlayers) & 1;
             const SeatAgents seats0 = assignSeats(0, partner_slot, *a, *b, partner.get());
             const SeatAgents seats1 = assignSeats(1, partner_slot, *a, *b, partner.get());
 
+            auto seedRun = [&](std::uint64_t run_tag) {
+                const std::uint64_t s = deck_seed * 0x9E3779B97F4A7C15ull + run_tag * 7919ull;
+                a->reseed(s + 1);
+                b->reseed(s + 2);
+                if (fixed_bidder) fixed_bidder->reseed(s + 3);
+                if (fixed_player) fixed_player->reseed(s + 4);
+                if (partner) partner->reseed(s + 5);
+            };
+
             if (fixed_bidder) {
                 // Record the fixed bidder's auction so even stochastic fixed
                 // bidders produce the identical contract on both mirrored runs.
                 std::vector<Bid> bids;
+                seedRun(1);
                 first[std::size_t(i)] =
                     playDeal(o.config, deck, dealer, 0, seats0, fixed_bidder.get(), fixed_player.get(), &bids, nullptr);
+                seedRun(2);
                 second[std::size_t(i)] =
                     playDeal(o.config, deck, dealer, 1, seats1, fixed_bidder.get(), fixed_player.get(), nullptr, &bids);
             } else {
+                seedRun(1);
                 first[std::size_t(i)] =
                     playDeal(o.config, deck, dealer, 0, seats0, nullptr, fixed_player.get());
+                seedRun(2);
                 second[std::size_t(i)] =
                     playDeal(o.config, deck, dealer, 1, seats1, nullptr, fixed_player.get());
             }
@@ -245,10 +263,24 @@ MatchDuelResult runMatchDuel(const MatchDuelOptions& o) {
             for (int side = 0; side < 2; ++side) {
                 const int a_team = side;
                 const SeatAgents seats = assignSeats(a_team, partner_slot, *a, *b, partner.get());
+                const std::uint64_t ms = pair_seed * 0x9E3779B97F4A7C15ull + std::uint64_t(side + 1) * 7919ull;
+                a->reseed(ms + 1);
+                b->reseed(ms + 2);
+                if (fixed_bidder) fixed_bidder->reseed(ms + 3);
+                if (fixed_player) fixed_player->reseed(ms + 4);
+                if (partner) partner->reseed(ms + 5);
+
                 Match m(o.config, first_dealer);
-                int deal_idx = 0;
-                while (!m.finished() && deal_idx < kMaxDealsPerMatch) {
-                    const auto deck = shuffledDeck(pair_seed + std::uint64_t(deal_idx));
+                int total_deals = 0;
+                int decided_idx = 0;
+                int redeal_attempt = 0;
+                while (!m.finished() && total_deals < kMaxDealsPerMatch) {
+                    // Key decks by (decided_idx, redeal_attempt) so a redeal in
+                    // one mirrored match doesn't shift all subsequent decided
+                    // deals onto different decks.
+                    const std::uint64_t dseed =
+                        pair_seed + std::uint64_t(decided_idx) * 1009ull + std::uint64_t(redeal_attempt);
+                    const auto deck = shuffledDeck(dseed);
                     const Run run = playDeal(o.config, deck, m.dealer(), a_team, seats, fixed_bidder.get(),
                                              fixed_player.get());
                     for (int s = 0; s < 2; ++s) {
@@ -256,7 +288,13 @@ MatchDuelResult runMatchDuel(const MatchDuelOptions& o) {
                         po.cards[s] += run.cards[s];
                     }
                     m.record(run.result);
-                    ++deal_idx;
+                    ++total_deals;
+                    if (run.passed) {
+                        ++redeal_attempt;
+                    } else {
+                        ++decided_idx;
+                        redeal_attempt = 0;
+                    }
                 }
                 const double w_val = !m.finished() ? 0.5 : (m.winner() == a_team ? 1.0 : 0.0);
                 po.win_score += w_val / 2.0;

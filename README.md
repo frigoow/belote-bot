@@ -44,15 +44,16 @@ build/belote_duel --mode match --a rollout:32:ab4 --b rule --bidder rule --match
 
 Baseline ladder (`Config::belgian()`, rule bidder for every seat, A's margin per deal):
 
-| A vs B | Units | Raw points | A ms/card |
-|---|---:|---:|---:|
-| rule vs random | +3.85 ± 0.24 | +38.9 ± 2.5 | 0.00 |
-| ISMCTS-1000 vs rule | +2.64 ± 0.30 | +26.3 ± 3.1 | 3.9 |
-| ISMCTS-1000 vs ISMCTS-100 | +1.39 ± 0.29 | +14.0 ± 3.0 | 4.0 |
-| ISMCTS-5000 vs ISMCTS-1000 | +0.31 ± 0.17 | +3.1 ± 1.8 | 17.4 |
-| rollout:32 vs rule | +2.77 ± 0.30 | +27.4 ± 3.1 | 0.19 |
-| rollout:32:ab4 vs rollout:32 | +0.41 ± 0.27 | +4.0 ± 2.7 | 0.51 |
-| rollout:32:ab4 vs ISMCTS-1000 | +0.00 ± 0.26 | −0.2 ± 2.7 | 0.53 |
+| A vs B | Decks × 2 | Units | Raw points | A ms/card |
+|---|---:|---:|---:|---:|
+| rule vs random | 911 | +3.85 ± 0.24 | +38.9 ± 2.5 | 0.00 |
+| ISMCTS-1000 vs rule | 911 | +2.64 ± 0.30 | +26.3 ± 3.1 | 3.9 |
+| ISMCTS-1000 vs ISMCTS-100 | 911 | +1.39 ± 0.29 | +14.0 ± 3.0 | 4.0 |
+| ISMCTS-5000 vs ISMCTS-1000 | 911 | +0.31 ± 0.17 | +3.1 ± 1.8 | 17.4 |
+| rollout:32 vs rule | 3,604 | +2.60 ± 0.15 | +25.8 ± 1.5 | 0.19 |
+| rollout:32:ab4 vs rollout:32 | 2,246 | +0.40 ± 0.17 | +4.0 ± 1.8 | 0.51 |
+| rollout:32 vs ISMCTS-1000 | 1,797 | −0.24 ± 0.19 | −2.4 ± 2.0 | 0.19 |
+| rollout:32:ab4 vs ISMCTS-1000 | 1,797 | +0.10 ± 0.20 | +0.9 ± 2.0 | 0.56 |
 
 Full 101-point matches (`--mode match`, 200 mirrored pairs = 400 matches, fixed rule bidder): `rollout:32:ab4` beats `rule` **75.25% ± 3.47 pp** (+24.5 ± 2.1 units/match).
 

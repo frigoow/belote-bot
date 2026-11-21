@@ -5,6 +5,7 @@
 
 #include "belote/deal.h"
 
+#include <cstdint>
 #include <map>
 
 namespace belote {
@@ -12,6 +13,7 @@ namespace belote {
 struct IsmctsOptions {
     unsigned iterations = 1000;  // total over all threads
     unsigned threads = 1;        // > 1: root-parallel trees, visits summed
+    std::uint64_t seed = 0;      // 0: random_device; >0: deterministic (when threads == 1)
 };
 
 struct SearchResult {

@@ -17,7 +17,9 @@
 
 #include <ismcts/game.h>
 
+#include <cstdint>
 #include <memory>
+#include <random>
 #include <vector>
 
 namespace belote {
@@ -26,7 +28,9 @@ class BeloteGame : public ISMCTS::POMGame<int> {
 public:
     // `sampler` (optional) is the prepared sampler of the root's player, so
     // the root's per-iteration determinizations don't rebuild the table.
-    explicit BeloteGame(Deal deal, std::shared_ptr<const WorldSampler> sampler = nullptr);
+    // `rng` (optional) provides a deterministic RNG stream when single-threaded.
+    explicit BeloteGame(Deal deal, std::shared_ptr<const WorldSampler> sampler = nullptr,
+                        std::shared_ptr<std::mt19937_64> rng = nullptr, std::uint64_t prng_seed = 0);
 
     Clone cloneAndRandomise(Player observer) const override;
     Player currentPlayer() const override { return Player(deal_.currentPlayer()); }
@@ -44,6 +48,9 @@ public:
 private:
     Deal deal_;
     std::shared_ptr<const WorldSampler> sampler_;
+    std::shared_ptr<std::mt19937_64> rng_;
+    std::uint64_t prng_seed_ = 0;
+    mutable bool prng_seeded_ = false;
 };
 
 // The deal's value for `team` in recorded units (held-over points excluded).

@@ -39,4 +39,11 @@ struct EndgameResult {
 // Solves the given deal exactly under perfect information. Must be in kPlay.
 EndgameResult solveEndgame(const Deal& deal, const EndgameOptions& options = {});
 
+// Plays an explicit sequence of legal cards to completion through the endgame
+// solver's internal state and leaf evaluator (returns Team 0 minus Team 1
+// score). Used to verify early-deal root setup (pending announcements, shows,
+// belot forfeit) directly against Deal::play().
+int evaluateEndgameLine(const Deal& deal, const std::vector<int>& cards,
+                        EndgameObjective objective = EndgameObjective::kUnits);
+
 }  // namespace belote
