@@ -3,6 +3,7 @@
 #include "bg/rule_policy.h"
 
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 #include <stdexcept>
 #include <thread>
@@ -98,13 +99,30 @@ void BgBatchPlayEnv::cacheLegal(int env) {
 }
 
 void BgBatchPlayEnv::resetAll(std::uint64_t seed) {
-    deals_.clear();
-    deals_.reserve(std::size_t(num_envs_));
-    for (int i = 0; i < num_envs_; ++i) {
-        rngs_[std::size_t(i)].seed(seed * 0x9E3779B97F4A7C15ull + std::uint64_t(i + 1) * 0xBF58476D1CE4E5B9ull);
-        deals_.push_back(makeFreshDeal(rngs_[std::size_t(i)]));
-        cacheLegal(i);
+    if (int(deals_.size()) != num_envs_) {
+        deals_.assign(std::size_t(num_envs_), Round(std::array<int, kCards>{}, 0));
     }
+    auto worker = [&](int begin, int end) {
+        for (int i = begin; i < end; ++i) {
+            rngs_[std::size_t(i)].seed(seed * 0x9E3779B97F4A7C15ull + std::uint64_t(i + 1) * 0xBF58476D1CE4E5B9ull);
+            deals_[std::size_t(i)] = makeFreshDeal(rngs_[std::size_t(i)]);
+            cacheLegal(i);
+        }
+    };
+    const int nt = std::min(threads_, num_envs_);
+    if (nt <= 1) {
+        worker(0, num_envs_);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(std::size_t(nt));
+    const int chunk = (num_envs_ + nt - 1) / nt;
+    for (int t = 0; t < nt; ++t) {
+        const int begin = t * chunk;
+        const int end = std::min(num_envs_, begin + chunk);
+        if (begin < end) pool.emplace_back(worker, begin, end);
+    }
+    for (auto& th : pool) th.join();
 }
 
 void BgBatchPlayEnv::observeBatch(float* state, float* history, std::int32_t* n_plies, float* legal_actions,
@@ -114,6 +132,27 @@ void BgBatchPlayEnv::observeBatch(float* state, float* history, std::int32_t* n_
     auto worker = [&](int begin, int end) {
         for (int b = begin; b < end; ++b) {
             const Round& r = deals_[std::size_t(b)];
+            if (r.finished()) {
+                std::memset(state + std::size_t(b) * kBgStateDim, 0, std::size_t(kBgStateDim) * sizeof(float));
+                if (legal_actions)
+                    std::memset(legal_actions + std::size_t(b) * kBgMaxLegal * kBgActionDim, 0,
+                                std::size_t(kBgMaxLegal * kBgActionDim) * sizeof(float));
+                if (legal_cards)
+                    std::fill(legal_cards + std::size_t(b) * kBgMaxLegal,
+                              legal_cards + std::size_t(b + 1) * kBgMaxLegal, -1);
+                if (n_plies) n_plies[b] = 0;
+                if (n_legal) n_legal[b] = 1;
+                if (current_team) current_team[b] = 0;
+                if (contract_out) contract_out[b] = r.contract();
+                if (belief_targets)
+                    std::fill(belief_targets + std::size_t(b) * 32, belief_targets + std::size_t(b + 1) * 32,
+                              std::int8_t(-1));
+                if (belief_marginals)
+                    std::memset(belief_marginals + std::size_t(b) * 96, 0, 96 * sizeof(float));
+                if (belief_allowed)
+                    std::memset(belief_allowed + std::size_t(b) * 96, 0, 96);
+                continue;
+            }
             const int me = r.toMove();
             const PublicState ps = publicState(r, me);
             const std::uint8_t contract = ps.contract;
@@ -191,10 +230,16 @@ void BgBatchPlayEnv::observeBatch(float* state, float* history, std::int32_t* n_
     for (auto& th : pool) th.join();
 }
 
-void BgBatchPlayEnv::stepBatch(const std::int32_t* action_idx, std::uint8_t* done_out, float* reward_t0_out) {
+void BgBatchPlayEnv::stepBatch(const std::int32_t* action_idx, std::uint8_t* done_out, float* reward_t0_out,
+                               bool auto_reset) {
     auto worker = [&](int begin, int end) {
         for (int b = begin; b < end; ++b) {
             Round& r = deals_[std::size_t(b)];
+            if (r.finished()) {
+                done_out[b] = 1;
+                reward_t0_out[b] = 0.0f;
+                continue;
+            }
             const int nl = cached_n_legal_[std::size_t(b)];
             int idx = action_idx[b];
             if (idx < 0 || idx >= nl) idx = 0;
@@ -207,12 +252,17 @@ void BgBatchPlayEnv::stepBatch(const std::int32_t* action_idx, std::uint8_t* don
                 done_out[b] = 1;
                 const RoundResult& res = r.result();
                 reward_t0_out[b] = float(res.sn - res.ew) / 40.0f;
-                deals_[std::size_t(b)] = makeFreshDeal(rngs_[std::size_t(b)]);
+                if (auto_reset) {
+                    deals_[std::size_t(b)] = makeFreshDeal(rngs_[std::size_t(b)]);
+                    cacheLegal(b);
+                } else {
+                    cached_n_legal_[std::size_t(b)] = 0;
+                }
             } else {
                 done_out[b] = 0;
                 reward_t0_out[b] = 0.0f;
+                cacheLegal(b);
             }
-            cacheLegal(b);
         }
     };
 

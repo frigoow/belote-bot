@@ -54,9 +54,11 @@ public:
                       std::uint8_t* belief_allowed) const;
 
     // Steps every env b by playing legal_cards[b, action_idx[b]] (claiming belote when allowed).
-    // When a deal finishes, writes done_out[b] = 1, reward_t0_out[b] = (res.sn - res.ew) / 40.0f,
-    // and resets env b to a fresh bid-and-ready deal in Decision::kPlay.
-    void stepBatch(const std::int32_t* action_idx, std::uint8_t* done_out, float* reward_t0_out);
+    // When a deal finishes, writes done_out[b] = 1, reward_t0_out[b] = (res.sn - res.ew) / 40.0f.
+    // If auto_reset is true, resets finished deals immediately; if false, skips already-finished deals
+    // until the next resetAll() call (eliminates 50% wasted deal generation in episodic collection!).
+    void stepBatch(const std::int32_t* action_idx, std::uint8_t* done_out, float* reward_t0_out,
+                   bool auto_reset = true);
 
     void resetAll(std::uint64_t seed);
     const Round& deal(int env) const { return deals_[std::size_t(env)]; }

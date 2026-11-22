@@ -371,7 +371,8 @@ PYBIND11_MODULE(bg_cpp, m) {
              py::arg("include_history") = true, py::arg("include_beliefs") = false,
              py::arg("include_belief_targets") = false, py::arg("include_belief_marginals") = false)
         .def("step_batch",
-             [](BgBatchPlayEnv& self, py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> action_idx) {
+             [](BgBatchPlayEnv& self, py::array_t<std::int32_t, py::array::c_style | py::array::forcecast> action_idx,
+                bool auto_reset) {
                  const int B = self.numEnvs();
                  if (action_idx.size() != B) throw std::invalid_argument("step_batch: action_idx size mismatch");
                  py::array_t<std::uint8_t> done(B);
@@ -381,10 +382,11 @@ PYBIND11_MODULE(bg_cpp, m) {
                  float* r_ptr = reward_t0.mutable_data();
                  {
                      py::gil_scoped_release release;
-                     self.stepBatch(act_ptr, d_ptr, r_ptr);
+                     self.stepBatch(act_ptr, d_ptr, r_ptr, auto_reset);
                  }
                  return py::make_tuple(std::move(done), std::move(reward_t0));
-             });
+             },
+             py::arg("action_idx"), py::arg("auto_reset") = true);
 
     py::class_<BgEvalSession>(m, "BgEvalSession")
         .def(py::init<int, std::uint64_t, const std::string&, int, const std::string&, bool>(),

@@ -142,7 +142,7 @@ def collect_episodes_gpu(
                 action_idx = greedy
 
             buf.chosen_idx[step].copy_(torch.from_numpy(action_idx.astype(np.int8)).to(device, non_blocking=True))
-            done, rew_t0 = env.step_batch(action_idx)
+            done, rew_t0 = env.step_batch(action_idx, auto_reset=False)
             newly_done = active_np & (done != 0)
             if np.any(newly_done):
                 final_rew_t0[newly_done] = rew_t0[newly_done]
@@ -233,7 +233,7 @@ def distill_fast_policy(
                     legal_masks_all.append(lmask32)
                     target_probs_all.append(tgt32)
 
-                done, _ = env.step_batch(greedy)
+                done, _ = env.step_batch(greedy, auto_reset=False)
                 finished |= done != 0
 
     X = np.concatenate(states_all, axis=0)
