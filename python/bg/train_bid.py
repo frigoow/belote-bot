@@ -160,15 +160,16 @@ def _write_resblock(f, rb: ResBlock) -> None:
     _write_ln(f, rb.ln2)
 
 
-def export_bid_bin(model: BgBidNet, path: Path) -> None:
+def export_bid_bin(model: BgBidNet, path: Path, use_natural_mask: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
+    ver = bg_cpp.BID_VERSION if use_natural_mask else bg_cpp.BID_VERSION_UNMASKED
     with open(tmp_path, "wb") as f:
         f.write(b"BGBD")
         f.write(
             struct.pack(
                 "<8i",
-                bg_cpp.BID_VERSION,
+                ver,
                 model.suit_dim,
                 model.global_dim,
                 model.step_dim,
@@ -202,8 +203,10 @@ def update_ema(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
 
 
 @torch.no_grad()
-def verify_cpp_parity(model: BgBidNet, bin_path: Path, sample_batch: Dict[str, np.ndarray]) -> float:
-    export_bid_bin(model, bin_path)
+def verify_cpp_parity(
+    model: BgBidNet, bin_path: Path, sample_batch: Dict[str, np.ndarray], use_natural_mask: bool = True
+) -> float:
+    export_bid_bin(model, bin_path, use_natural_mask=use_natural_mask)
     cpp_m = bg_cpp.BgBidModel()
     if not cpp_m.load(str(bin_path)):
         raise RuntimeError(f"Failed to load exported {bin_path} in C++ BgBidModel")
@@ -232,8 +235,10 @@ def verify_cpp_parity(model: BgBidNet, bin_path: Path, sample_batch: Dict[str, n
 
 
 @torch.no_grad()
-def eval_calibration(model: BgBidNet, env: bg_cpp.BgBatchBidEnv, device: torch.device, allow_double: bool) -> str:
-    b = env.generate_batch(1000, seed=88888, explore_eps=0.0, allow_double=allow_double)
+def eval_calibration(
+    model: BgBidNet, env: bg_cpp.BgBatchBidEnv, device: torch.device, allow_double: bool, use_natural_mask: bool
+) -> str:
+    b = env.generate_batch(1000, seed=88888, explore_eps=0.0, allow_double=allow_double, use_natural_mask=use_natural_mask)
     N = int(b["n_samples"])
     if N == 0:
         return "val_rmse=n/a"
@@ -266,18 +271,25 @@ def eval_calibration(model: BgBidNet, env: bg_cpp.BgBatchBidEnv, device: torch.d
 
 
 def run_eval_suite(
-    model: BgBidNet, env: bg_cpp.BgBatchBidEnv, device: torch.device, eval_deals: int, eval_seed: int, allow_double: bool
+    model: BgBidNet,
+    env: bg_cpp.BgBatchBidEnv,
+    device: torch.device,
+    eval_deals: int,
+    eval_seed: int,
+    allow_double: bool,
+    use_natural_mask: bool,
 ) -> str:
-    cal = eval_calibration(model, env, device, allow_double)
+    cal = eval_calibration(model, env, device, allow_double, use_natural_mask)
     r0 = env.eval_vs_natural(eval_deals, eval_seed, 0, False, allow_double)
     r10 = env.eval_vs_natural(eval_deals, eval_seed + 100, 10, False, allow_double)
     rmix = env.eval_vs_natural(eval_deals, eval_seed + 200, 0, True, allow_double)
+    dbl_str = f" x2/x4={r0['pct_dbl']:.1f}/{r0['pct_rdbl']:.1f}%" if allow_double else ""
     return (
         f"{cal} | "
         f"vs nat(0): {r0['mean']:+.2f}±{r0['ci']:.2f} | "
         f"vs nat(+10AT): {r10['mean']:+.2f}±{r10['ci']:.2f} | "
         f"mixed(Bid+nat): {rmix['mean']:+.2f}±{rmix['ci']:.2f} | "
-        f"mix S/NT/AT/P={r0['pct_suit']:.1f}/{r0['pct_nt']:.1f}/{r0['pct_at']:.1f}/{r0['pct_pass']:.1f}% | "
+        f"mix S/NT/AT/P={r0['pct_suit']:.1f}/{r0['pct_nt']:.1f}/{r0['pct_at']:.1f}/{r0['pct_pass']:.1f}%{dbl_str} | "
         f"audit J9={r0['suit_has_j9']:.1f}% A={r0['nt_has_ace']:.1f}% J={r0['at_has_j']:.1f}%"
     )
 
@@ -305,9 +317,14 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=4)
     ap.add_argument("--eval-deals", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=2026)
+    ap.add_argument("--suit-hidden", type=int, default=32)
+    ap.add_argument("--global-hidden", type=int, default=96)
+    ap.add_argument("--gru-hidden", type=int, default=48)
     ap.add_argument("--allow-double", action="store_true")
+    ap.add_argument("--unmasked", action="store_true", help="Disable natural sanity mask; train on ALL legal Belot bids")
     ap.add_argument("--resume", default="")
     args = ap.parse_args()
+    use_natural_mask = not args.unmasked
 
     log_path = Path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,27 +345,32 @@ def main() -> None:
         f"=== BgBidNet Stage B1 v2 (1-Pass Fresh Streaming + EMA + Paired Adv) === "
         f"device={device} bf16={use_bf16} iters={args.iters} warmup={args.warmup_iters} "
         f"deals/iter={args.deals_per_iter} lr={args.lr} wd={args.weight_decay} "
-        f"adv_w={args.adv_weight} ema={args.ema_decay} allow_double={args.allow_double}",
+        f"adv_w={args.adv_weight} ema={args.ema_decay} allow_double={args.allow_double} "
+        f"natural_mask={use_natural_mask}",
         flush=True,
     )
 
     env = bg_cpp.BgBatchBidEnv(args.fast_at, args.fast_suit, args.fast_nt, threads=args.threads)
-    model = BgBidNet(suit_hidden=32, global_hidden=96, gru_hidden=48).to(device)
+    model = BgBidNet(
+        suit_hidden=args.suit_hidden, global_hidden=args.global_hidden, gru_hidden=args.gru_hidden
+    ).to(device)
     ema_model = copy.deepcopy(model).to(device)
 
     if args.resume:
         sd = torch.load(args.resume, map_location=device)
         model.load_state_dict(sd["model"] if isinstance(sd, dict) and "model" in sd else sd)
         ema_model.load_state_dict(sd["ema_model"] if isinstance(sd, dict) and "ema_model" in sd else model.state_dict())
-        export_bid_bin(ema_model, bin_path)
+        export_bid_bin(ema_model, bin_path, use_natural_mask=use_natural_mask)
         env.load_bid_model(str(bin_path))
         print(f"Resumed from {args.resume}", flush=True)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"BgBidNet params: {n_params:,} (trunk_dim={model.trunk_dim})", flush=True)
 
-    probe = env.generate_batch(64, seed=args.seed + 999999, explore_eps=0.1, allow_double=args.allow_double)
-    max_diff = verify_cpp_parity(ema_model, bin_path, probe)
+    probe = env.generate_batch(
+        64, seed=args.seed + 999999, explore_eps=0.1, allow_double=args.allow_double, use_natural_mask=use_natural_mask
+    )
+    max_diff = verify_cpp_parity(ema_model, bin_path, probe, use_natural_mask=use_natural_mask)
     print(f"C++ <-> PyTorch parity check ({min(32, probe['n_samples'])} states): max |diff| = {max_diff:.2e}", flush=True)
     if max_diff > 1e-4:
         raise RuntimeError(f"Parity check failed: max_diff={max_diff}")
@@ -376,6 +398,7 @@ def main() -> None:
             seed=args.seed * 10000 + it,
             explore_eps=eps,
             allow_double=args.allow_double,
+            use_natural_mask=use_natural_mask,
         )
         gen_s = time.time() - tg
         n_samp = int(batch["n_samples"])
@@ -415,7 +438,7 @@ def main() -> None:
                 else:
                     loss = mse_q
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             ema_steps += 1
             # Ramp EMA decay cleanly from 0 -> args.ema_decay during early steps
@@ -430,10 +453,10 @@ def main() -> None:
         in_selfplay = (it >= args.warmup_iters) or bool(args.resume)
         if it == args.warmup_iters and not args.resume:
             wu_path = out_dir / "bg_bid_wu.bin"
-            export_bid_bin(ema_model, wu_path)
+            export_bid_bin(ema_model, wu_path, use_natural_mask=use_natural_mask)
             print(f"   Saved pure-anchored warmup model to {wu_path}", flush=True)
         if in_selfplay:
-            export_bid_bin(ema_model, bin_path)
+            export_bid_bin(ema_model, bin_path, use_natural_mask=use_natural_mask)
             if not env.load_bid_model(str(bin_path)):
                 raise RuntimeError(f"Failed to reload {bin_path}")
 
@@ -448,12 +471,18 @@ def main() -> None:
         if it == args.warmup_iters or it % args.eval_every == 0 or it == args.iters:
             # Temporarily load EMA weights for evaluation even during warmup!
             if not in_selfplay:
-                export_bid_bin(ema_model, bin_path)
+                export_bid_bin(ema_model, bin_path, use_natural_mask=use_natural_mask)
                 env_eval = bg_cpp.BgBatchBidEnv(args.fast_at, args.fast_suit, args.fast_nt, threads=args.threads)
                 env_eval.load_bid_model(str(bin_path))
-                ev = run_eval_suite(ema_model, env_eval, device, args.eval_deals, eval_seed=54321, allow_double=args.allow_double)
+                ev = run_eval_suite(
+                    ema_model, env_eval, device, args.eval_deals, eval_seed=54321,
+                    allow_double=args.allow_double, use_natural_mask=use_natural_mask,
+                )
             else:
-                ev = run_eval_suite(ema_model, env, device, args.eval_deals, eval_seed=54321, allow_double=args.allow_double)
+                ev = run_eval_suite(
+                    ema_model, env, device, args.eval_deals, eval_seed=54321,
+                    allow_double=args.allow_double, use_natural_mask=use_natural_mask,
+                )
             msg += f"\n   EVAL: {ev}"
         print(msg, flush=True)
 
@@ -471,8 +500,8 @@ def main() -> None:
         },
         ckpt_path,
     )
-    export_bid_bin(ema_model, bin_path)
-    final_diff = verify_cpp_parity(ema_model, bin_path, probe)
+    export_bid_bin(ema_model, bin_path, use_natural_mask=use_natural_mask)
+    final_diff = verify_cpp_parity(ema_model, bin_path, probe, use_natural_mask=use_natural_mask)
     print(
         f"Done! Saved latest EMA checkpoint {ckpt_path} and binary {bin_path} "
         f"(final parity max |diff| = {final_diff:.2e}, total branches = {total_branches:,})",

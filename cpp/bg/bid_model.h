@@ -18,8 +18,9 @@
 
 namespace bg {
 
-inline constexpr int kBgBidVersion = 1;
-inline constexpr int kBgNumBids = 9;        // 0:Pass, 1:C, 2:D, 3:H, 4:S, 5:NT, 6:AT, 7:x2, 8:x4
+inline constexpr int kBgBidVersion = 1;          // masked (naturalBidMask)
+inline constexpr int kBgBidVersionUnmasked = 2;  // unmasked (pure legal Belot bids)
+inline constexpr int kBgNumBids = 9;             // 0:Pass, 1:C, 2:D, 3:H, 4:S, 5:NT, 6:AT, 7:x2, 8:x4
 inline constexpr int kBgBidSuitDim = 16;    // per-suit features (shared across 4 suits)
 inline constexpr int kBgBidGlobalDim = 64;  // global auction + seat + hand summary
 inline constexpr int kBgBidStepDim = 13;    // relSeat(4) + bidIndex(9) per prior bid
@@ -68,31 +69,33 @@ struct BidPublicState {
 
 BidPublicState bidPublicState(const Round& r, int sn = 0, int ew = 0);
 
-// Returns a 9-bit mask of legal bids after applying our safe natural sanity mask
-// (blocks absurd relay bids like 0-card suits while keeping real human hands such
-// as A-10-K-Q suits and 9-9-A-A partner AT raises legal). Bit 0 (Pass) is always 1.
+// Returns a 9-bit mask of legal bids. When use_natural_mask is true, applies
+// our soft natural sanity mask; when false, returns ALL legal Belot bids (pure rules).
+std::uint16_t rawLegalBidMask(const BidPublicState& bs, bool allow_double = false);
 std::uint16_t naturalBidMask(const BidPublicState& bs, bool allow_double = false);
+std::uint16_t bidActionMask(const BidPublicState& bs, bool allow_double = false, bool use_natural_mask = true);
 
 // Encodes BidPublicState into:
 //  - suit_feats[4 * kBgBidSuitDim]
 //  - global_feats[kBgBidGlobalDim]
 //  - bid_hist[kBgMaxBids * kBgBidStepDim]
-//  - legal_mask[kBgNumBids] (1.0f if allowed by naturalBidMask, else 0.0f)
+//  - legal_mask[kBgNumBids] (1.0f if allowed by bidActionMask, else 0.0f)
 // Returns n_bids = min(bs.bids.size(), kBgMaxBids).
 int encodeBidState(const BidPublicState& bs, bool allow_double, float* suit_feats, float* global_feats,
-                   float* bid_hist, float* legal_mask);
+                   float* bid_hist, float* legal_mask, bool use_natural_mask = true);
 
 // Plain-C++ AVX2+FMA inference for BgBidNet (BGBD binary format).
 class BgBidModel {
 public:
     bool load(const std::string& path);
     bool loaded() const { return loaded_; }
+    bool useNaturalMask() const { return use_natural_mask_; }
 
     // Predicts Q(s, b) (scaled game-point margin / 30.0f) for all 9 bid actions.
     void forwardQ(const float* suit_feats, const float* global_feats, const float* bid_hist, int n_bids,
                   float* q_out) const;
 
-    // Picks the highest-Q legal bid (under naturalBidMask). If temp > 0, samples softmax(Q / temp).
+    // Picks the highest-Q legal bid (using natural mask if version==1, pure legal bids if version==2).
     std::uint8_t chooseBid(const BidPublicState& bs, bool allow_double = false, double double_margin = 0.0) const;
     std::uint8_t chooseBid(const Round& r, bool allow_double = false, double double_margin = 0.0) const;
 
@@ -101,6 +104,7 @@ public:
 
 private:
     bool loaded_ = false;
+    bool use_natural_mask_ = true;
     int suit_hidden_ = 0, global_hidden_ = 0, gru_hidden_ = 0, trunk_dim_ = 0;
     // Shared per-suit tower (applied identically to each of the 4 suits)
     detail::Linear suit_fc1_, suit_fc2_;
@@ -142,7 +146,7 @@ public:
     // 25% vs aggressive-AT natural opponents (naturalBidTuned(+10)).
     // Before a BidModel is loaded, uses naturalBid / naturalBidTuned(+10) as behavior policy.
     CounterfactualBidBatch generateBatch(int num_deals, std::uint64_t seed, double explore_eps = 0.08,
-                                         bool allow_double = false) const;
+                                         bool allow_double = false, bool use_natural_mask = true) const;
 
     // Fast C++ mirrored-deal bidding duel: A (loaded BgBidModel) vs B (naturalBid / naturalBidTuned)
     // with BOTH sides playing cards via our 3 Specialist FastPolicy models!
@@ -151,6 +155,7 @@ public:
         double ci = 0.0;
         int deals = 0;
         double pct_suit = 0.0, pct_nt = 0.0, pct_at = 0.0, pct_pass = 0.0;
+        double pct_dbl = 0.0, pct_rdbl = 0.0;
         double suit_has_j9 = 0.0, nt_has_ace = 0.0, at_has_j = 0.0;
     };
     DuelSummary evalVsNatural(int num_deals, std::uint64_t seed, int opp_at_bonus = 0, bool mixed_partner = false,
@@ -158,7 +163,8 @@ public:
 
 private:
     int playFastDeal(Round r) const;
-    std::uint8_t pickPolicyBid(const Round& r, int mode, std::mt19937_64& rng, double eps, bool allow_double) const;
+    std::uint8_t pickPolicyBid(const Round& r, int mode, std::mt19937_64& rng, double eps, bool allow_double,
+                               bool use_natural_mask) const;
 
     BgFastPolicyModel fast_at_, fast_suit_, fast_nt_;
     BgBidModel bid_model_;

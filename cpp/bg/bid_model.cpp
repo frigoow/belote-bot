@@ -226,13 +226,31 @@ std::uint16_t naturalBidMask(const BidPublicState& bs, bool allow_double) {
     return mask;
 }
 
+std::uint16_t rawLegalBidMask(const BidPublicState& bs, bool allow_double) {
+    std::uint16_t mask = 1u;  // Pass
+    for (int s = 0; s < 4; ++s) {
+        if (bs.avail & std::uint8_t(1u << s)) mask |= std::uint16_t(1u << (1 + s));
+    }
+    if (bs.avail & kNoTrumps) mask |= std::uint16_t(1u << 5);
+    if (bs.avail & kAllTrumps) mask |= std::uint16_t(1u << 6);
+    if (allow_double) {
+        if (bs.avail & kDouble) mask |= std::uint16_t(1u << 7);
+        if (bs.avail & kReDouble) mask |= std::uint16_t(1u << 8);
+    }
+    return mask;
+}
+
+std::uint16_t bidActionMask(const BidPublicState& bs, bool allow_double, bool use_natural_mask) {
+    return use_natural_mask ? naturalBidMask(bs, allow_double) : rawLegalBidMask(bs, allow_double);
+}
+
 int encodeBidState(const BidPublicState& bs, bool allow_double, float* suit_feats, float* global_feats,
-                   float* bid_hist, float* legal_mask) {
+                   float* bid_hist, float* legal_mask, bool use_natural_mask) {
     std::memset(suit_feats, 0, std::size_t(4 * kBgBidSuitDim) * sizeof(float));
     std::memset(global_feats, 0, std::size_t(kBgBidGlobalDim) * sizeof(float));
     std::memset(bid_hist, 0, std::size_t(kBgMaxBids * kBgBidStepDim) * sizeof(float));
 
-    const std::uint16_t nmask = naturalBidMask(bs, allow_double);
+    const std::uint16_t nmask = bidActionMask(bs, allow_double, use_natural_mask);
     for (int i = 0; i < kBgNumBids; ++i) legal_mask[i] = (nmask & (1u << i)) ? 1.0f : 0.0f;
 
     // Replay auction history to extract current contract, declarer, consecutive passes, and per-seat flags.
@@ -363,10 +381,11 @@ bool BgBidModel::load(const std::string& path) {
     std::int32_t hdr[8]{};
     if (!readBytes(in, magic, 4) || std::memcmp(magic, "BGBD", 4) != 0) return false;
     if (!readBytes(in, hdr, sizeof(hdr))) return false;
-    if (hdr[0] != kBgBidVersion || hdr[1] != kBgBidSuitDim || hdr[2] != kBgBidGlobalDim ||
-        hdr[3] != kBgBidStepDim || hdr[7] != kBgNumBids) {
+    if ((hdr[0] != kBgBidVersion && hdr[0] != kBgBidVersionUnmasked) || hdr[1] != kBgBidSuitDim ||
+        hdr[2] != kBgBidGlobalDim || hdr[3] != kBgBidStepDim || hdr[7] != kBgNumBids) {
         return false;
     }
+    use_natural_mask_ = (hdr[0] == kBgBidVersion);
     suit_hidden_ = hdr[4];
     global_hidden_ = hdr[5];
     gru_hidden_ = hdr[6];
@@ -429,11 +448,11 @@ std::uint16_t BgBidModel::evalBids(const BidPublicState& bs, bool allow_double,
     float gf[kBgBidGlobalDim];
     float bh[kBgMaxBids * kBgBidStepDim];
     float lm[kBgNumBids];
-    const int nb = encodeBidState(bs, allow_double, sf, gf, bh, lm);
+    const int nb = encodeBidState(bs, allow_double, sf, gf, bh, lm, use_natural_mask_);
     float q[kBgNumBids]{};
     forwardQ(sf, gf, bh, nb, q);
     for (int i = 0; i < kBgNumBids; ++i) q_pts[static_cast<std::size_t>(i)] = double(q[i]) * 30.0;
-    return naturalBidMask(bs, allow_double);
+    return bidActionMask(bs, allow_double, use_natural_mask_);
 }
 
 std::uint8_t BgBidModel::chooseBid(const BidPublicState& bs, bool allow_double, double double_margin) const {
@@ -484,7 +503,7 @@ int BgBatchBidEnv::playFastDeal(Round r) const {
 }
 
 std::uint8_t BgBatchBidEnv::pickPolicyBid(const Round& r, int seat_policy, std::mt19937_64& rng, double eps,
-                                          bool allow_double) const {
+                                          bool allow_double, bool use_natural_mask) const {
     // seat_policy: 0 = BidModel (or naturalBid if unloaded), 1 = naturalBid(0), 2 = naturalBidTuned(+10 AT)
     if (seat_policy == 1 || !bid_model_.loaded()) {
         return naturalBidTuned(r, 0, 0, allow_double);
@@ -494,7 +513,7 @@ std::uint8_t BgBatchBidEnv::pickPolicyBid(const Round& r, int seat_policy, std::
     }
     const BidPublicState bs = bidPublicState(r);
     if (eps > 0.0 && std::uniform_real_distribution<double>(0.0, 1.0)(rng) < eps) {
-        const std::uint16_t m = naturalBidMask(bs, allow_double);
+        const std::uint16_t m = bidActionMask(bs, allow_double, use_natural_mask);
         int opts[kBgNumBids], n = 0;
         for (int i = 0; i < kBgNumBids; ++i)
             if (m & (1u << i)) opts[n++] = i;
@@ -504,7 +523,7 @@ std::uint8_t BgBatchBidEnv::pickPolicyBid(const Round& r, int seat_policy, std::
 }
 
 CounterfactualBidBatch BgBatchBidEnv::generateBatch(int num_deals, std::uint64_t seed, double explore_eps,
-                                                    bool allow_double) const {
+                                                    bool allow_double, bool use_natural_mask) const {
     struct LocalBuf {
         int n = 0;
         std::vector<float> sf, gf, bh, lm, tgt;
@@ -554,16 +573,16 @@ CounterfactualBidBatch BgBatchBidEnv::generateBatch(int num_deals, std::uint64_t
                 const int me = r.toMove();
                 const int my_team = teamOf(me);
                 const BidPublicState bs = bidPublicState(r);
-                const std::uint16_t nmask = naturalBidMask(bs, allow_double);
+                const std::uint16_t nmask = bidActionMask(bs, allow_double, use_natural_mask);
 
-                // Only generate counterfactual training nodes when it's a BidNet seat with >= 2 legal natural bids!
+                // Only generate counterfactual training nodes when it's a BidNet seat with >= 2 legal bids!
                 int n_opts = 0;
                 for (int i = 0; i < kBgNumBids; ++i)
                     if (nmask & (1u << i)) ++n_opts;
 
                 if (seat_pol[me] == 0 && n_opts >= 2) {
                     float sf[4 * kBgBidSuitDim], gf[kBgBidGlobalDim], bh[kBgMaxBids * kBgBidStepDim], lm[kBgNumBids];
-                    const int nb = encodeBidState(bs, allow_double, sf, gf, bh, lm);
+                    const int nb = encodeBidState(bs, allow_double, sf, gf, bh, lm, use_natural_mask);
                     float tgt[kBgNumBids]{};
 
                     // Branch over EVERY legal bid on this exact 32-card deal!
@@ -573,7 +592,7 @@ CounterfactualBidBatch BgBatchBidEnv::generateBatch(int num_deals, std::uint64_t
                         rb.bid(indexToBid(bi));
                         while (rb.decision() == Round::Decision::kBid) {
                             const int s2 = rb.toMove();
-                            rb.bid(pickPolicyBid(rb, seat_pol[s2], rng, 0.0, allow_double));
+                            rb.bid(pickPolicyBid(rb, seat_pol[s2], rng, 0.0, allow_double, use_natural_mask));
                         }
                         const int m0 = playFastDeal(std::move(rb));
                         const int my_m = my_team == 0 ? m0 : -m0;
@@ -590,7 +609,7 @@ CounterfactualBidBatch BgBatchBidEnv::generateBatch(int num_deals, std::uint64_t
                 }
 
                 // Advance actual auction trajectory with mild exploration.
-                const std::uint8_t act = pickPolicyBid(r, seat_pol[me], rng, explore_eps, allow_double);
+                const std::uint8_t act = pickPolicyBid(r, seat_pol[me], rng, explore_eps, allow_double, use_natural_mask);
                 r.bid(act);
             }
         }
@@ -627,13 +646,13 @@ BgBatchBidEnv::DuelSummary BgBatchBidEnv::evalVsNatural(int num_deals, std::uint
                                                         bool mixed_partner, bool allow_double) const {
     std::vector<double> pair_scores(static_cast<std::size_t>(num_deals), 0.0);
     std::mutex mu;
-    long c_suit = 0, c_nt = 0, c_at = 0, c_pass = 0;
+    long c_suit = 0, c_nt = 0, c_at = 0, c_pass = 0, c_dbl = 0, c_rdbl = 0;
     long suit_total = 0, suit_j9 = 0, nt_total = 0, nt_ace = 0, at_total = 0, at_j = 0;
 
     const int nt = std::min(threads_, std::max(1, num_deals));
     std::vector<std::thread> pool;
     auto worker = [&](int begin, int end) {
-        long ls = 0, lnt = 0, lat = 0, lp = 0;
+        long ls = 0, lnt = 0, lat = 0, lp = 0, ld = 0, lr = 0;
         long stot = 0, sj9 = 0, ntot = 0, na = 0, atot = 0, aj = 0;
         std::array<int, kCards> deck;
         std::iota(deck.begin(), deck.end(), 0);
@@ -675,9 +694,13 @@ BgBatchBidEnv::DuelSummary BgBatchBidEnv::evalVsNatural(int num_deals, std::uint
                 }
                 if (side == 0) {
                     if (r.finished()) ++lp;
-                    else if (r.contract() & kAllTrumps) ++lat;
-                    else if (r.contract() & kNoTrumps) ++lnt;
-                    else ++ls;
+                    else {
+                        if (r.contract() & kAllTrumps) ++lat;
+                        else if (r.contract() & kNoTrumps) ++lnt;
+                        else ++ls;
+                        if (r.contract() & kReDouble) ++lr;
+                        else if (r.contract() & kDouble) ++ld;
+                    }
                 }
                 const int m0 = playFastDeal(std::move(r));
                 pair += 0.5 * double(side == 0 ? m0 : -m0);
@@ -685,7 +708,7 @@ BgBatchBidEnv::DuelSummary BgBatchBidEnv::evalVsNatural(int num_deals, std::uint
             pair_scores[static_cast<std::size_t>(i)] = pair;
         }
         std::lock_guard<std::mutex> lk(mu);
-        c_suit += ls; c_nt += lnt; c_at += lat; c_pass += lp;
+        c_suit += ls; c_nt += lnt; c_at += lat; c_pass += lp; c_dbl += ld; c_rdbl += lr;
         suit_total += stot; suit_j9 += sj9; nt_total += ntot; nt_ace += na; at_total += atot; at_j += aj;
     };
     const int chunk = (num_deals + nt - 1) / nt;
@@ -710,6 +733,8 @@ BgBatchBidEnv::DuelSummary BgBatchBidEnv::evalVsNatural(int num_deals, std::uint
     out.pct_nt = 100.0 * double(c_nt) / tot;
     out.pct_at = 100.0 * double(c_at) / tot;
     out.pct_pass = 100.0 * double(c_pass) / tot;
+    out.pct_dbl = 100.0 * double(c_dbl) / tot;
+    out.pct_rdbl = 100.0 * double(c_rdbl) / tot;
     out.suit_has_j9 = suit_total > 0 ? 100.0 * double(suit_j9) / double(suit_total) : 100.0;
     out.nt_has_ace = nt_total > 0 ? 100.0 * double(nt_ace) / double(nt_total) : 100.0;
     out.at_has_j = at_total > 0 ? 100.0 * double(at_j) / double(at_total) : 100.0;

@@ -434,6 +434,7 @@ PYBIND11_MODULE(bg_cpp, m) {
         });
 
     m.attr("BID_VERSION") = kBgBidVersion;
+    m.attr("BID_VERSION_UNMASKED") = kBgBidVersionUnmasked;
     m.attr("NUM_BIDS") = kBgNumBids;
     m.attr("BID_SUIT_DIM") = kBgBidSuitDim;
     m.attr("BID_GLOBAL_DIM") = kBgBidGlobalDim;
@@ -458,11 +459,12 @@ PYBIND11_MODULE(bg_cpp, m) {
              py::arg("fast_at"), py::arg("fast_suit"), py::arg("fast_nt"), py::arg("threads") = 12)
         .def("load_bid_model", &BgBatchBidEnv::loadBidModel)
         .def("generate_batch",
-             [](const BgBatchBidEnv& self, int num_deals, std::uint64_t seed, double explore_eps, bool allow_double) {
+             [](const BgBatchBidEnv& self, int num_deals, std::uint64_t seed, double explore_eps, bool allow_double,
+                bool use_natural_mask) {
                  CounterfactualBidBatch b;
                  {
                      py::gil_scoped_release release;
-                     b = self.generateBatch(num_deals, seed, explore_eps, allow_double);
+                     b = self.generateBatch(num_deals, seed, explore_eps, allow_double, use_natural_mask);
                  }
                  const py::ssize_t N = b.n_samples;
                  py::array_t<float> sf({N, py::ssize_t(4), py::ssize_t(kBgBidSuitDim)});
@@ -490,7 +492,7 @@ PYBIND11_MODULE(bg_cpp, m) {
                  return out;
              },
              py::arg("num_deals"), py::arg("seed") = 1, py::arg("explore_eps") = 0.08,
-             py::arg("allow_double") = false)
+             py::arg("allow_double") = false, py::arg("use_natural_mask") = true)
         .def("eval_vs_natural",
              [](const BgBatchBidEnv& self, int num_deals, std::uint64_t seed, int opp_at_bonus, bool mixed_partner,
                 bool allow_double) {
@@ -507,6 +509,8 @@ PYBIND11_MODULE(bg_cpp, m) {
                  out["pct_nt"] = s.pct_nt;
                  out["pct_at"] = s.pct_at;
                  out["pct_pass"] = s.pct_pass;
+                 out["pct_dbl"] = s.pct_dbl;
+                 out["pct_rdbl"] = s.pct_rdbl;
                  out["suit_has_j9"] = s.suit_has_j9;
                  out["nt_has_ace"] = s.nt_has_ace;
                  out["at_has_j"] = s.at_has_j;
