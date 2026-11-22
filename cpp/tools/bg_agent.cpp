@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
     std::string fast_at, belief_at, qgru_at;
     bool bid_allow_double = false;
     double bid_double_margin = 3.0;
+    BidMatchEquityOptions bid_me;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() { return i + 1 < argc ? std::string(argv[++i]) : std::string(); };
@@ -53,6 +54,15 @@ int main(int argc, char** argv) {
         else if (a == "--bid") bid_path = next();
         else if (a == "--bid-double") bid_allow_double = true;
         else if (a == "--bid-double-margin") bid_double_margin = std::stod(next());
+        else if (a == "--bid-me") bid_me.enabled = true;
+        else if (a == "--bid-me-score") bid_me.min_score = std::stoi(next());
+        else if (a == "--bid-me-worlds") bid_me.worlds = std::stoi(next());
+        else if (a == "--bid-me-top") bid_me.top_k = std::stoi(next());
+        else if (a == "--bid-me-temp") bid_me.prior_temp = std::stod(next());
+        else if (a == "--bid-me-dbl-edge") bid_me.dbl_eq_edge = std::stod(next());
+        else if (a == "--neural-auction") o.neural_auction_weight = std::stod(next());
+        else if (a == "--neural-auction-temp") o.neural_auction_temp = std::stod(next());
+        else if (a == "--neural-auction-subsets") o.neural_auction_subsets = std::stoi(next());
         else if (a == "--fast") fast_path = next();
         else if (a == "--belief") belief_path = next();
         else if (a == "--qgru") qgru_path = next();
@@ -84,9 +94,12 @@ int main(int argc, char** argv) {
     BgBeliefModel belief_model, belief_m_suit, belief_m_nt, belief_m_at;
     BgQGRUModel q_model, q_m_suit, q_m_nt, q_m_at;
     BgBidModel bid_model;
-    if (!bid_path.empty() && !bid_model.load(bid_path)) {
-        std::cerr << "bg_agent: failed to load --bid " << bid_path << std::endl;
-        return 2;
+    if (!bid_path.empty()) {
+        if (!bid_model.load(bid_path)) {
+            std::cerr << "bg_agent: failed to load --bid " << bid_path << std::endl;
+            return 2;
+        }
+        o.bid_model = &bid_model;
     }
     auto loadOne = [](auto& m, const std::string& p, const auto*& dst, const char* tag) -> bool {
         if (p.empty()) return true;
@@ -111,6 +124,10 @@ int main(int argc, char** argv) {
         !loadOne(q_m_at, qgru_at, o.at_models.q, "--qgru-at")) {
         return 2;
     }
+    bid_me.fast_at = o.at_models.fast;
+    bid_me.fast_suit = o.suit_models.fast;
+    bid_me.fast_nt = o.nt_models.fast;
+    bid_me.fast_fallback = o.fast_policy;
     std::mt19937_64 rng(seed ? seed : std::random_device{}());
     std::ios::sync_with_stdio(false);
     std::string line;
@@ -131,7 +148,9 @@ int main(int argc, char** argv) {
             int chosen = int(kPass);
             try {
                 if (bid_model.loaded()) {
-                    chosen = int(bid_model.chooseBid(bs, bid_allow_double, bid_double_margin));
+                    chosen = int(bid_me.enabled
+                                     ? bid_model.chooseBidMatchEquity(bs, bid_allow_double, bid_double_margin, bid_me, rng)
+                                     : bid_model.chooseBid(bs, bid_allow_double, bid_double_margin));
                 } else {
                     chosen = int(kPass);
                 }

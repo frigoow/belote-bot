@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cstdint>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -84,6 +85,24 @@ std::uint16_t bidActionMask(const BidPublicState& bs, bool allow_double = false,
 int encodeBidState(const BidPublicState& bs, bool allow_double, float* suit_feats, float* global_feats,
                    float* bid_hist, float* legal_mask, bool use_natural_mask = true);
 
+// Options for decision-time Match-Equity-aware bidding verification (Stage B2).
+// When max(sn, ew) >= min_score or hanging > 0, samples paired 27-card worlds
+// importance-weighted by prior bids, rolls out top candidate bids with our
+// 3 Specialist FastPolicy models, and maximizes exact MatchEquityTable win prob!
+struct BidMatchEquityOptions {
+    bool enabled = false;
+    int min_score = 105;         // trigger when max(sn, ew) >= min_score or hanging > 0
+    int worlds = 64;             // paired CRN worlds per late-game bid decision
+    int top_k = 3;               // evaluate Pass + top_k non-pass bids (+ Double/Redouble within dbl_window)
+    double prior_temp = 5.0;     // softmax temperature (game pts) for weighting prior bids
+    double dbl_window = 12.0;    // include Double/Redouble candidate if within dbl_window pts of best Q
+    double dbl_eq_edge = 0.005;  // small win-prob edge (0.5 pp) required to prefer x2/x4
+    const BgFastPolicyModel* fast_at = nullptr;
+    const BgFastPolicyModel* fast_suit = nullptr;
+    const BgFastPolicyModel* fast_nt = nullptr;
+    const BgFastPolicyModel* fast_fallback = nullptr;
+};
+
 // Plain-C++ AVX2+FMA inference for BgBidNet (BGBD binary format).
 class BgBidModel {
 public:
@@ -99,8 +118,18 @@ public:
     std::uint8_t chooseBid(const BidPublicState& bs, bool allow_double = false, double double_margin = 0.0) const;
     std::uint8_t chooseBid(const Round& r, bool allow_double = false, double double_margin = 0.0) const;
 
+    // Match-Equity-aware bid chooser: delegates to chooseBid() in early linear-equity deals,
+    // and runs paired importance-weighted MatchEquityTable rollouts near match point / hanging deals.
+    std::uint8_t chooseBidMatchEquity(const BidPublicState& bs, bool allow_double, double double_margin,
+                                      const BidMatchEquityOptions& me_opts, std::mt19937_64& rng) const;
+
     // Writes per-action Q values (in game points = 30 * Q) and returns legal mask.
     std::uint16_t evalBids(const BidPublicState& bs, bool allow_double, std::array<double, kBgNumBids>& q_pts) const;
+
+    // Neural auction log-likelihood of ps.bids given candidate 8-card hands (marginalized
+    // over `n_subsets` evenly-covering 5-card initial subsets per non-self seat).
+    double auctionLogLik(const PublicState& ps, const Hands& hands, bool allow_double = true, double temp = 5.0,
+                         int n_subsets = 2) const;
 
 private:
     bool loaded_ = false;

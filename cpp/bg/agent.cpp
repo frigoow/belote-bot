@@ -1,4 +1,5 @@
 #include "bg/agent.h"
+#include "bg/bid_model.h"
 #include "bg/match_equity.h"
 #include "bg/rule_policy.h"
 
@@ -456,7 +457,9 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     const bool rule_play_weight = o.lik_eps < 1.0 && !ps.plays.empty();
     const bool fast_play_weight = use_fast && o.fast_lik_weight > 0.0 && !ps.plays.empty();
     const bool bid_weight = o.auction_weight > 0.0 && !ps.bids.empty();
-    const bool weighted = rule_play_weight || fast_play_weight || bid_weight;
+    const bool neural_bid_weight = o.bid_model != nullptr && o.bid_model->loaded() &&
+                                   o.neural_auction_weight > 0.0 && !ps.bids.empty();
+    const bool weighted = rule_play_weight || fast_play_weight || bid_weight || neural_bid_weight;
 
     // Precompute Belief-DP per-card weights once at the root (~0.14 ms) if BgBeliefModel is loaded.
     std::array<std::array<double, 3>, kCards> belief_weights{};
@@ -469,6 +472,10 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
         if (rule_play_weight) lw += double(policyMismatches(ps, h)) * std::log(std::max(o.lik_eps, 1e-12));
         if (fast_play_weight) lw += o.fast_lik_weight * fastPlayLogLik(ps, h, *fast_ptr, o.fast_lik_temp);
         if (bid_weight) lw += o.auction_weight * auctionLogLik(ps, h);
+        if (neural_bid_weight) {
+            lw += o.neural_auction_weight *
+                  o.bid_model->auctionLogLik(ps, h, true, o.neural_auction_temp, o.neural_auction_subsets);
+        }
         return lw;
     };
 
