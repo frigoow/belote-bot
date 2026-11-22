@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Copies the Belot networks from this repository's checkpoints/ (gitignored)
 # into the Android assets, under the names app/cpp/belot_api.cpp loads. The
-# default set is the one measured at 54.35% +- 1.74 pp of 2000 games against
-# Kostov's Master (runs/bg_bridge_e2e_bid_dbl_5mspec_1000p.log). Override the
-# directories to ship other exports, e.g. SUIT=bg_models_suit_20m app/models.sh
+# default set is the 20M specialist refit measured at 58.25% +- 1.68 pp of
+# 2000 games against unlimited-time Kostov's Master (runs/bg_bridge_e2e_20mspec_1000p.log).
 set -euo pipefail
 cd "$(dirname "$0")"
 SRC="${CHECKPOINTS:-../checkpoints}"   # or another checkout's: CHECKPOINTS=/path/to/checkpoints
 DEST=belot-app/src/main/assets/models
-BID="${BID:-bg_models_bid_unmasked_dbl}"; SUIT="${SUIT:-bg_models_suit}"; NT="${NT:-bg_models_nt_latest}"; AT="${AT:-bg_models_at}"
+BID="${BID:-bg_models_bid_unmasked_dbl}"; SUIT="${SUIT:-bg_models_suit_20m}"; NT="${NT:-bg_models_nt_20m}"; AT="${AT:-bg_models_at_20m}"
 mkdir -p "$DEST"
 copy() { cp "$SRC/$1" "$DEST/$2"; echo "  $2 <- $1"; }
 copy "$BID/bg_bid.bin" belot_bid.bin

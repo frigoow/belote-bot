@@ -354,8 +354,9 @@ std::string viewJson(const BelotGame& g, int me) {
 SearchOptions searchOptions(int level, std::uint64_t seed) {
     const Models& m = models();
     SearchOptions o;
-    // The configuration of the strongest measured player (runs/bg_bridge_e2e_bid_dbl_5mspec_1000p.log:
-    // 54.35% +- 1.74 pp of 2000 games against Kostov's Master), with fewer worlds below the top level.
+    // The configuration of the strongest measured player (runs/bg_bridge_e2e_20mspec_1000p.log:
+    // 58.25% +- 1.68 pp, +12.2 +- 1.9 pts/game over 2000 games against unlimited-time Kostov's Master),
+    // with fewer worlds below the top level.
     o.worlds = level >= 2 ? 192 : 64;
     o.root_exact_trick = 4;
     o.endgame_tricks = 3;

@@ -30,7 +30,7 @@ permissions:
   contents: write
 
 env:
-  MODELS_TAG: belot-models-v1
+  MODELS_TAG: belot-models-v2
 
 jobs:
   package:

@@ -18,7 +18,7 @@ from [cardbot-framework](https://github.com/frigoow/cardbot-framework), the git 
 The bots are the strongest measured configuration: the unmasked neural
 bidder with doubles, card play by world sampling with the belief, fast-policy
 and Q-GRU nets of the three contract kinds, racing and an exact endgame (in
-Kostov's engine: 54.35% ± 1.74 pp of 2000 games against his Master). "Strong"
+Kostov's engine: 58.25% ± 1.68 pp of 2000 games against unlimited-time Master). "Strong"
 searches 192 worlds (about 120 ms a card on a desktop CPU without AVX2),
 "Normal" 64, "Easy" plays the rule policy. To ship newer nets, export them,
 point `models.sh` at their directories (`SUIT=bg_models_suit_20m app/models.sh`)
