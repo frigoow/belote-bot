@@ -12,6 +12,8 @@
 
 #include <array>
 #include <cstdint>
+#include "cardbot/sampler.h"
+
 #include <functional>
 #include <optional>
 #include <random>
@@ -88,21 +90,19 @@ public:
     bool admits(const Hands& hands) const;  // per-card facts and sizes
 
 private:
+    using Core = cardbot::HiddenDeal<kTricks>;
+    Hands toHands(const Core::Hands& w) const;
+    Core::Accept accept() const;  // the replay check, when the opponents declared
     PublicState ps_;
     Facts facts_;
     std::array<int, 3> others_{};
-    std::vector<int> hidden_;                  // hidden cards
-    std::vector<std::uint8_t> domain_;          // per hidden card: bit k = others_[k] may hold it
-    std::vector<double> ways_;                  // [i][a][b] completions of cards i.. with capacities a, b (c implied)
+    std::vector<int> hidden_;           // hidden cards
     std::array<int, 3> need_{};
-    // Placements of the opponents' declared combinations (empty: none, or too many).
-    struct Placement {
-        std::vector<std::uint8_t> domain;
-        double weight;
-    };
-    std::vector<Placement> placements_;
-    double placement_total_ = 0;
-    double ways(std::size_t i, int a, int b) const;
+    // The counting core (cardbot-framework): hidden_ with each card's domain
+    // (bit k = others_[k] may hold it), and the placements of the opponents'
+    // declared combinations (none, or too many to list).
+    Core core_;
+    double ways(std::size_t i, int a, int b) const { return core_.ways(i, a, b); }
 };
 
 // Replays a deal from every seat's cards at the start of play (current hands +

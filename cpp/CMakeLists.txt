@@ -78,7 +78,10 @@ add_library(belote_bg STATIC
     bg/match_equity.cpp
     bg/bid_model.cpp
 )
-target_link_libraries(belote_bg PUBLIC belote_core Threads::Threads)
+# The game-independent bot code (network kernels, ...): cardbot-framework's C++,
+# the git submodule at the repository root (git submodule update --init).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../cardbot-framework/cpp ${CMAKE_BINARY_DIR}/cardbot)
+target_link_libraries(belote_bg PUBLIC belote_core cardbot Threads::Threads)
 target_compile_options(belote_bg PRIVATE ${BELOTE_WARNINGS})
 add_executable(belote_test_bg tests/test_bg.cpp)
 target_link_libraries(belote_test_bg PRIVATE belote_bg)

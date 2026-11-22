@@ -13,6 +13,7 @@
 #include "bg/bg.h"
 #include "bg/encoder.h"
 #include "bg/view.h"
+#include "cardbot/nn.h"
 
 #include <array>
 #include <cstdint>
@@ -47,34 +48,12 @@ private:
     std::vector<float> b3_;
 };
 
+// The layers (and their kernels and readers) are cardbot-framework's (cardbot/nn.h).
 namespace detail {
-
-struct Linear {
-    int in_dim = 0, out_dim = 0;
-    std::vector<float> w;  // [out_dim, in_dim]
-    std::vector<float> b;  // [out_dim]
-};
-
-struct LayerNorm {
-    int dim = 0;
-    std::vector<float> w;
-    std::vector<float> b;
-};
-
-struct ResBlock {
-    Linear fc1, fc2;
-    LayerNorm ln1, ln2;
-};
-
-struct GruLayer {
-    int in_dim = 0, hidden = 0;
-    std::vector<float> w_ih;       // [3*hidden, in_dim]
-    std::vector<float> w_hh;       // [3*hidden, hidden]
-    std::vector<float> b_ih;       // [3*hidden]
-    std::vector<float> b_hh;       // [3*hidden]
-    std::vector<float> empty_emb;  // [hidden]
-};
-
+using cardbot::nn::GruLayer;
+using cardbot::nn::LayerNorm;
+using cardbot::nn::Linear;
+using cardbot::nn::ResBlock;
 }  // namespace detail
 
 class BgBeliefModel {
