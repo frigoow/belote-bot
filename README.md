@@ -146,3 +146,7 @@ app/fetch_models.sh
 ```
 
 Training logs and binary checkpoints live in gitignored `runs/` and `checkpoints/`. Pre-trained network bundles are published as [`belot-models-v2`](https://github.com/frigoow/belote-bot/releases/tag/belot-models-v2).
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE) (including the attribution requirements in [NOTICE](NOTICE)).
