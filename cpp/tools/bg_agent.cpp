@@ -63,6 +63,8 @@ int main(int argc, char** argv) {
         else if (a == "--neural-auction") o.neural_auction_weight = std::stod(next());
         else if (a == "--neural-auction-temp") o.neural_auction_temp = std::stod(next());
         else if (a == "--neural-auction-subsets") o.neural_auction_subsets = std::stoi(next());
+        else if (a == "--raw-tiebreak") o.raw_tiebreak = true;
+        else if (a == "--exact-worlds") o.exact_worlds = std::stoi(next());
         else if (a == "--fast") fast_path = next();
         else if (a == "--belief") belief_path = next();
         else if (a == "--qgru") qgru_path = next();

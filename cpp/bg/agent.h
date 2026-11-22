@@ -51,7 +51,7 @@ struct EndgameResult {
     std::vector<std::pair<int, int>> move_values;
     long nodes = 0;
 };
-EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx = {});
+EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx = {}, bool raw_tiebreak = false);
 int solveEndgameValue(const Round& r, int team, const MatchContext& match_ctx = {});
 
 struct NeuralSuite {
@@ -86,6 +86,8 @@ struct SearchOptions {
     double neural_auction_weight = 0.0;
     double neural_auction_temp = 5.0;
     int neural_auction_subsets = 2;
+    bool raw_tiebreak = false;   // break exact-endgame rounded game-point ties by raw card-point margin
+    int exact_worlds = 0;        // >0: cap worlds used when solving root exact (keeps Trick 3 fast!)
     double q_blend = 0.0;
     int q_taper_trick = 6;
     bool race = false;
