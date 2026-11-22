@@ -1,0 +1,36 @@
+name: App
+
+# The Belot app (app/): the C interface over the engine (cpp/) and its tests,
+# then the Kotlin side on the desktop JVM through JNI. Only when the app, the
+# engine or the cardtable submodule change. The networks are not needed
+# (without them the bots bid by rule and search without nets).
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'cpp/belote/**', 'cpp/bg/**', 'cardtable', '.github/workflows/app*.yml']
+  pull_request:
+    paths: ['app/**', 'cpp/belote/**', 'cpp/bg/**', 'cardtable', '.github/workflows/app*.yml']
+
+jobs:
+  belot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: C++
+        run: |
+          cmake -B build-app -S app/cpp -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-app -j
+          ctest --test-dir build-app --output-on-failure
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Android SDK licences
+        run: |
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdk" --licenses > /dev/null || true
+      - name: Kotlin
+        working-directory: app
+        run: ./gradlew --no-daemon -Pmanille.skipAndroidApp=true :belot:desktopTest :belot-desktop:compileKotlin

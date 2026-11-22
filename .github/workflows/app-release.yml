@@ -1,0 +1,113 @@
+name: App release
+
+# Push a tag belot-vX.Y.Z (matching versionName in app/belot-app/build.gradle.kts)
+# and this builds the signed APK and the Windows, macOS and Linux packages and
+# attaches them to the release of that tag here (made if absent). The
+# networks come from the release BELOT_MODELS_TAG.
+#
+# Needs the secrets BELOT_KEYSTORE_B64, BELOT_KEYSTORE_PASSWORD,
+# BELOT_KEY_ALIAS and BELOT_KEY_PASSWORD: the Belot signing key, never
+# another one, or updates stop installing.
+on:
+  push:
+    tags: ['belot-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. belot-v0.1.1
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  BELOT_MODELS_TAG: belot-models-v1
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          submodules: true
+      - name: Tag matches the app version
+        run: |
+          name=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/belot-app/build.gradle.kts)
+          if [ "belot-v$name" != "$TAG" ]; then
+            echo "::error::tag $TAG but versionName is $name -- bump app/belot-app/build.gradle.kts"; exit 1
+          fi
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Android SDK packages
+        run: |
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdk" --licenses > /dev/null
+          "$sdk" --install "platforms;android-37.0" "ndk;30.0.16138531" "cmake;3.22.1"
+      - name: Networks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: BELOT_MODELS_TAG=$BELOT_MODELS_TAG app/fetch_models.sh
+      - name: Build
+        working-directory: app
+        env:
+          KEYSTORE_B64: ${{ secrets.BELOT_KEYSTORE_B64 }}
+          BELOT_KEYSTORE_PASSWORD: ${{ secrets.BELOT_KEYSTORE_PASSWORD }}
+          BELOT_KEY_ALIAS: ${{ secrets.BELOT_KEY_ALIAS }}
+          BELOT_KEY_PASSWORD: ${{ secrets.BELOT_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then echo "::error::secret BELOT_KEYSTORE_B64 is not set"; exit 1; fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/belot.keystore"
+          BELOT_KEYSTORE="$RUNNER_TEMP/belot.keystore" ./gradlew --no-daemon :belot-app:assembleRelease
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/belot-app/build/outputs/apk/release/belot-app-release.apk Belot.apk
+          if gh release view "$TAG" > /dev/null 2>&1; then gh release upload "$TAG" Belot.apk --clobber
+          else gh release create "$TAG" Belot.apk --title "Belot ${TAG#belot-v}" --generate-notes; fi
+
+  desktop:
+    needs: apk
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, format: msi, asset: Belot-Windows.msi }
+          - { os: macos-latest, format: dmg, asset: Belot-macOS.dmg }
+          - { os: ubuntu-latest, format: deb, asset: Belot-Linux.deb }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          submodules: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Android SDK licences
+        run: |
+          sdk="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ -f "$sdk.bat" ]; then sdk="$sdk.bat"; fi
+          yes | "$sdk" --licenses > /dev/null || true
+      - name: Networks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: BELOT_MODELS_TAG=$BELOT_MODELS_TAG app/fetch_models.sh
+      - name: Package
+        working-directory: app
+        run: ./gradlew --no-daemon -Pmanille.skipAndroidApp=true :belot-desktop:packageDistributionForCurrentOS
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          file=$(ls app/belot-desktop/build/compose/binaries/main/${{ matrix.format }}/*.${{ matrix.format }} | head -1)
+          cp "$file" "${{ matrix.asset }}"
+          gh release upload "$TAG" "${{ matrix.asset }}" --clobber

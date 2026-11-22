@@ -16,3 +16,10 @@ bg/oracle/obj/
 bg/bridge/bin/
 bg/bridge/obj/
 runs/
+app/belot-app/src/main/assets/models/*.bin
+app/.gradle/
+app/.kotlin/
+app/belot-app/.cxx/
+app/buildSrc/.gradle/
+app/local.properties
+app/gradle/gradle-daemon-jvm.properties
