@@ -1,4 +1,5 @@
 #include "bg/agent.h"
+#include "cardbot/search.h"
 #include "bg/match_equity.h"
 #include "bg/rule_policy.h"
 
@@ -426,6 +427,44 @@ double fastPlayLogLik(const PublicState& ps, const Hands& hands, const BgFastPol
 
 }  // namespace
 
+namespace {
+
+// What cardbot::drawWorlds asks of the game: Belot's sampler, its replay of
+// the public record, the likelihood weights and the belief net's prior.
+struct BelotWorlds {
+    const PublicState& ps;
+    const DealSampler& sampler;
+    bool use_belief;
+    const std::array<std::array<double, 3>, kCards>& belief_weights;
+    bool is_weighted;
+    std::function<double(const Hands&)> weight;
+
+    double count() const { return sampler.count(); }
+    std::vector<Hands> enumerate(std::uint64_t cap) const { return sampler.enumerate(cap); }
+    std::optional<Round> replay(const Hands& h) const { return sampler.replay(h); }
+    std::optional<Hands> draw(std::mt19937_64& rng) const {
+        auto h = use_belief ? sampler.sampleWeighted(rng, belief_weights) : sampler.sample(rng);
+        if (!h && use_belief) h = sampler.sample(rng);
+        return h;
+    }
+    std::optional<Hands> drawHard(std::mt19937_64& rng) const { return sampler.sample(rng, 1000); }
+    bool weighted() const { return is_weighted; }
+    double logWeight(const Hands& h) const { return weight(h); }
+    bool hasPrior() const { return use_belief; }
+    // the belief net's marginals as a product prior on enumerated worlds
+    void addLogPrior(const Hands& h, double& lw) const {
+        const auto& others = sampler.others();
+        for (int k = 0; k < 3; ++k) {
+            for (Mask m = h[std::size_t(others[std::size_t(k)])]; m; m &= m - 1) {
+                const int c = lowestCard(m);
+                lw += std::log(std::max(belief_weights[std::size_t(c)][std::size_t(k)], 1e-6));
+            }
+        }
+    }
+};
+
+}  // namespace
+
 SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     SearchResult res;
     const int team = teamOf(ps.me);
@@ -464,140 +503,20 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
         belief_weights = belief_ptr->samplerWeights(ps, sampler, o.belief_temp);
     }
 
-    auto logWeight = [&](const Hands& h) -> double {
+    // The worlds (cardbot-framework): enumerated when few, else drawn, weighted, resampled, deduplicated.
+    const BelotWorlds source{ps, sampler, use_belief, belief_weights, weighted, [&](const Hands& h) -> double {
         double lw = 0.0;
         if (rule_play_weight) lw += double(policyMismatches(ps, h)) * std::log(std::max(o.lik_eps, 1e-12));
         if (fast_play_weight) lw += o.fast_lik_weight * fastPlayLogLik(ps, h, *fast_ptr, o.fast_lik_temp);
         if (bid_weight) lw += o.auction_weight * auctionLogLik(ps, h);
         return lw;
-    };
-
-    std::vector<Round> bases;
-    std::vector<double> wts;
-    bool enumerated = false;
-
-    const double total_worlds = sampler.count();
-    if (total_worlds > 0.0 && total_worlds <= double(std::max(1, o.worlds))) {
-        const auto all = sampler.enumerate(std::uint64_t(std::max(1, o.worlds)));
-        if (!all.empty()) {
-            std::vector<double> lws;
-            lws.reserve(all.size());
-            bases.reserve(all.size());
-            const auto& others = sampler.others();
-            for (const Hands& h : all) {
-                auto r = sampler.replay(h);
-                if (!r) continue;
-                double lw = weighted ? logWeight(h) : 0.0;
-                if (use_belief) {
-                    // Multiply by BeliefNet marginal product prior on exact enumerated worlds.
-                    for (int k = 0; k < 3; ++k) {
-                        for (Mask m = h[std::size_t(others[std::size_t(k)])]; m; m &= m - 1) {
-                            const int c = lowestCard(m);
-                            lw += std::log(std::max(belief_weights[std::size_t(c)][std::size_t(k)], 1e-6));
-                        }
-                    }
-                }
-                bases.push_back(std::move(*r));
-                lws.push_back(lw);
-            }
-            if (!bases.empty()) {
-                enumerated = true;
-                double top = *std::max_element(lws.begin(), lws.end());
-                wts.resize(bases.size());
-                for (std::size_t i = 0; i < bases.size(); ++i)
-                    wts[i] = (weighted || use_belief) ? std::exp(std::max(-40.0, lws[i] - top)) : 1.0;
-            }
-        }
-    }
-
-    if (!enumerated) {
-        const int n_draw = weighted ? o.worlds * std::max(1, o.pool) : o.worlds;
-        std::vector<Hands> drawn;
-        std::vector<Round> pool_bases;
-        std::vector<double> lws;
-        drawn.reserve(std::size_t(n_draw));
-        pool_bases.reserve(std::size_t(n_draw));
-        lws.reserve(std::size_t(n_draw));
-        for (int i = 0; i < n_draw; ++i) {
-            auto h = use_belief ? sampler.sampleWeighted(rng, belief_weights) : sampler.sample(rng);
-            if (!h && use_belief) h = sampler.sample(rng);
-            if (!h) break;
-            auto r = sampler.replay(*h);
-            if (!r) continue;
-            drawn.push_back(*h);
-            pool_bases.push_back(std::move(*r));
-            lws.push_back(weighted ? logWeight(*h) : 0.0);
-        }
-        if (pool_bases.empty()) {
-            // Ultra-rare fallback (e.g. 3 overlapping opponent declarations): try uniform sampler with high tries.
-            for (int i = 0; i < std::max(8, o.worlds / 4); ++i) {
-                auto h = sampler.sample(rng, 1000);
-                if (!h) break;
-                auto r = sampler.replay(*h);
-                if (!r) continue;
-                drawn.push_back(*h);
-                pool_bases.push_back(std::move(*r));
-                lws.push_back(0.0);
-            }
-        }
-        if (pool_bases.empty()) throw std::runtime_error("searchCard: no consistent world");
-
-        std::vector<std::size_t> picked;
-        if (weighted) {
-            const int count = std::min(o.worlds, int(pool_bases.size()));
-            const double top = *std::max_element(lws.begin(), lws.end());
-            std::vector<double> pw(pool_bases.size());
-            double sum = 0.0;
-            for (std::size_t i = 0; i < pool_bases.size(); ++i) {
-                pw[i] = std::exp(std::max(-40.0, lws[i] - top));
-                sum += pw[i];
-            }
-            const double step = sum / double(count);
-            double u = std::uniform_real_distribution<double>(0.0, step)(rng);
-            double cum = pw[0];
-            std::size_t j = 0;
-            picked.reserve(std::size_t(count));
-            for (int k = 0; k < count; ++k, u += step) {
-                while (u > cum && j + 1 < pw.size()) cum += pw[++j];
-                picked.push_back(j);
-            }
-        } else {
-            picked.resize(pool_bases.size());
-            for (std::size_t i = 0; i < pool_bases.size(); ++i) picked[i] = i;
-        }
-
-        // Weight-first deduplication: evaluate each unique sampled world once.
-        std::sort(picked.begin(), picked.end(),
-                  [&](std::size_t a, std::size_t b) { return drawn[a] < drawn[b]; });
-        bases.reserve(picked.size());
-        wts.reserve(picked.size());
-        for (std::size_t k = 0; k < picked.size(); ++k) {
-            const std::size_t idx = picked[k];
-            if (k > 0 && drawn[idx] == drawn[picked[k - 1]]) {
-                wts.back() += 1.0;
-            } else {
-                bases.push_back(std::move(pool_bases[idx]));
-                wts.push_back(1.0);
-            }
-        }
-        // Shuffle deduplicated worlds before CRN candidate racing to remove lexicographic order bias!
-        if (o.race && bases.size() > 1) {
-            std::vector<std::size_t> perm(bases.size());
-            for (std::size_t i = 0; i < perm.size(); ++i) perm[i] = i;
-            std::shuffle(perm.begin(), perm.end(), rng);
-            std::vector<Round> sb;
-            std::vector<double> sw;
-            sb.reserve(bases.size());
-            sw.reserve(wts.size());
-            for (std::size_t idx : perm) {
-                sb.push_back(std::move(bases[idx]));
-                sw.push_back(wts[idx]);
-            }
-            bases.swap(sb);
-            wts.swap(sw);
-        }
-    }
-
+    }};
+    cardbot::WorldOptions wo;
+    wo.worlds = o.worlds;
+    wo.pool = o.pool;
+    wo.shuffle = o.race;
+    cardbot::WorldSet<Round> ws = cardbot::drawWorlds<Round>(source, wo, rng);
+    const std::vector<Round>& bases = ws.states;
     const std::size_t nw = bases.size();
     const Round& any = bases[0];
     const Mask legal = any.legalMoves();
@@ -631,157 +550,56 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     std::vector<int> moves;
     for (Mask m = legal; m; m &= m - 1) moves.push_back(lowestCard(m));
     const std::size_t nm = moves.size();
-    std::vector<double> val(nm * nw, 0.0);
     const bool exact = any.trickNumber() >= o.root_exact_trick && any.trickNumber() >= 2;
 
-    std::vector<char> alive(nm, 1);
-    std::size_t w_eval = 0;
-
-    if (exact || !o.race || nw <= std::size_t(std::max(1, o.race_min)) || nm <= 2) {
-        for (std::size_t w = 0; w < nw; ++w) {
-            if (exact) {
-                const EndgameResult er = solveEndgame(bases[w], team, match_ctx);
-                const double scale = match_ctx.enabled ? (1.0 / 96.0) : 1.0;
-                for (std::size_t i = 0; i < nm; ++i)
-                    for (const auto& [c, v] : er.move_values)
-                        if (c == moves[i]) val[i * nw + w] = double(v) * scale;
-            } else {
-                for (std::size_t i = 0; i < nm; ++i) {
-                    Round sim = bases[w];
-                    sim.play(moves[i], true);
-                    val[i * nw + w] = playOut(std::move(sim), team, o.endgame_tricks, fast_ptr, match_ctx);
-                }
-            }
-        }
-        w_eval = nw;
-    } else {
-        // CRN Candidate Racing over shared worlds in batches.
-        std::size_t next_check = std::size_t(std::max(8, o.race_min));
-        const std::size_t step = std::size_t(std::max(8, o.race_step));
-        std::size_t n_alive = nm;
-        for (std::size_t w = 0; w < nw; ++w) {
+    // Each move on each world: exact from the root late in the deal, else a play-out.
+    auto evaluate = [&](std::size_t w, const std::vector<char>& alive, std::vector<double>& val) {
+        if (exact) {
+            const EndgameResult er = solveEndgame(bases[w], team, match_ctx);
+            const double scale = match_ctx.enabled ? (1.0 / 96.0) : 1.0;
+            for (std::size_t i = 0; i < nm; ++i)
+                for (const auto& [c, v] : er.move_values)
+                    if (c == moves[i]) val[i * nw + w] = double(v) * scale;
+        } else {
             for (std::size_t i = 0; i < nm; ++i) {
                 if (!alive[i]) continue;
                 Round sim = bases[w];
                 sim.play(moves[i], true);
                 val[i * nw + w] = playOut(std::move(sim), team, o.endgame_tricks, fast_ptr, match_ctx);
             }
-            w_eval = w + 1;
-            if (w_eval >= next_check && w_eval < nw && n_alive > 1) {
-                next_check = w_eval + step;
-                double sw = 0.0, sw2 = 0.0;
-                for (std::size_t k = 0; k < w_eval; ++k) {
-                    sw += wts[k];
-                    sw2 += wts[k] * wts[k];
-                }
-                const double ess = (sw * sw) / std::max(sw2, 1e-12);
-                std::vector<double> cur_m(nm, -1e30);
-                std::size_t leader = 0;
-                for (std::size_t i = 0; i < nm; ++i) {
-                    if (!alive[i]) continue;
-                    double acc = 0.0;
-                    for (std::size_t k = 0; k < w_eval; ++k) acc += wts[k] * val[i * nw + k];
-                    cur_m[i] = acc / sw;
-                    if (!alive[leader] || cur_m[i] > cur_m[leader]) leader = i;
-                }
-                for (std::size_t i = 0; i < nm; ++i) {
-                    if (!alive[i] || i == leader) continue;
-                    const double diff = cur_m[leader] - cur_m[i];
-                    if (diff <= 0.0) continue;
-                    double var = 0.0;
-                    for (std::size_t k = 0; k < w_eval; ++k) {
-                        const double d = (val[leader * nw + k] - val[i * nw + k]) - diff;
-                        var += wts[k] * d * d;
-                    }
-                    const double se = std::sqrt(std::max(var / sw, 1e-12) / std::max(ess, 1.0));
-                    if (diff > o.race_z * se) {
-                        alive[i] = 0;
-                        --n_alive;
-                    }
-                }
-                if (n_alive <= 1) break;
-            }
         }
-    }
-
-    double sum_w = 0.0, sum_w2 = 0.0;
-    for (std::size_t w = 0; w < w_eval; ++w) {
-        sum_w += wts[w];
-        sum_w2 += wts[w] * wts[w];
-    }
-    res.worlds = int(std::lround(sum_w));
-
-    std::vector<double> mean(nm, -1e30);
-    double alive_search_avg = 0.0;
-    int alive_cnt = 0;
-    for (std::size_t i = 0; i < nm; ++i) {
-        if (!alive[i]) continue;
-        double acc = 0.0;
-        for (std::size_t w = 0; w < w_eval; ++w) acc += wts[w] * val[i * nw + w];
-        mean[i] = acc / sum_w;
-        alive_search_avg += mean[i];
-        ++alive_cnt;
-    }
-    if (alive_cnt > 0) alive_search_avg /= double(alive_cnt);
+    };
 
     // Optional Root Q-GRU Blend with linear late-deal taper (0 when exact root AB solves the trick!).
-    std::vector<double> score = mean;
-    const double w_q = (use_q && o.q_blend > 0.0 && !exact && any.trickNumber() < o.q_taper_trick)
-                           ? o.q_blend * (1.0 - double(any.trickNumber() - 1) / double(std::max(1, o.q_taper_trick - 1)))
-                           : 0.0;
-    if (w_q > 0.0 && !q_root.empty()) {
-        std::vector<double> qm(nm, 0.0);
-        double q_avg = 0.0;
-        for (std::size_t i = 0; i < nm; ++i) {
+    cardbot::QBlend qb;
+    qb.weight = (use_q && o.q_blend > 0.0 && !exact && any.trickNumber() < o.q_taper_trick)
+                    ? o.q_blend * (1.0 - double(any.trickNumber() - 1) / double(std::max(1, o.q_taper_trick - 1)))
+                    : 0.0;
+    if (qb.weight > 0.0 && !q_root.empty()) {
+        qb.q.assign(nm, 0.0);
+        for (std::size_t i = 0; i < nm; ++i)
             for (const auto& [c, v] : q_root)
-                if (c == moves[i]) qm[i] = v;
-            if (alive[i]) q_avg += qm[i];
-        }
-        if (alive_cnt > 0) q_avg /= double(alive_cnt);
-        const double slope =
-            match_ctx.enabled
-                ? 100.0 * MatchEquityTable::instance().marginSlope(
-                              team == 0 ? ps.sn : ps.ew, team == 0 ? ps.ew : ps.sn, ps.hanging,
-                              teamOf(ps.first) == team)
-                : 1.0;
-        for (std::size_t i = 0; i < nm; ++i) {
-            if (!alive[i]) continue;
-            const double q_aligned = match_ctx.enabled ? (alive_search_avg + slope * (qm[i] - q_avg)) : qm[i];
-            score[i] = (1.0 - w_q) * mean[i] + w_q * q_aligned;
-        }
+                if (c == moves[i]) qb.q[i] = v;
+        qb.center = match_ctx.enabled;
+        qb.slope = match_ctx.enabled
+                       ? 100.0 * MatchEquityTable::instance().marginSlope(
+                                     team == 0 ? ps.sn : ps.ew, team == 0 ? ps.ew : ps.sn, ps.hanging,
+                                     teamOf(ps.first) == team)
+                       : 1.0;
     }
 
-    std::size_t best = 0, rule_i = 0;
-    bool best_init = false;
-    for (std::size_t i = 0; i < nm; ++i) {
-        if (moves[i] == res.rule_card) rule_i = i;
-        if (alive[i]) {
-            res.values.push_back({moves[i], score[i]});
-            if (!best_init || score[i] > score[best]) {
-                best = i;
-                best_init = true;
-            }
-        }
-    }
-    if (best == rule_i) return res;
-    if (o.z < 0 || enumerated || !alive[rule_i]) {
-        res.card = moves[best];
-        res.overruled = true;
-        return res;
-    }
-    const double m = score[best] - score[rule_i];
-    const double dm = mean[best] - mean[rule_i];
-    double var = 0.0;
-    for (std::size_t w = 0; w < w_eval; ++w) {
-        const double d = (val[best * nw + w] - val[rule_i * nw + w]) - dm;
-        var += wts[w] * d * d;
-    }
-    const double ess = (sum_w * sum_w) / std::max(sum_w2, 1e-12);
-    const double se = (1.0 - w_q) * std::sqrt(std::max(var / sum_w, 1e-12) / std::max(ess, 1.0));
-    if (m > o.margin && m > o.z * se) {
-        res.card = moves[best];
-        res.overruled = true;
-    }
+    cardbot::RaceOptions ro;
+    ro.race = o.race;
+    ro.race_min = o.race_min;
+    ro.race_step = o.race_step;
+    ro.race_z = o.race_z;
+    ro.z = o.z;
+    ro.margin = o.margin;
+    const auto rr = cardbot::raceMoves(moves, ws.weights, ws.enumerated, exact, res.rule_card, evaluate, qb, ro);
+    res.card = rr.move;
+    res.overruled = rr.overruled;
+    res.worlds = rr.worlds;
+    res.values = rr.values;
     return res;
 }
 
