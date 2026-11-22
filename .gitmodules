@@ -1,0 +1,3 @@
+[submodule "cardbot-framework"]
+	path = cardbot-framework
+	url = https://github.com/frigoow/cardbot-framework.git

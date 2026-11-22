@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Arena on Kostov's engine (github.com/NikolayIT/BelotGameEngine, MIT): our
+       C++ card player (cpp/tools/bg_agent.cpp) behind an IPlayer, against his
+       bots, in mirrored whole games refereed by his BelotGame. Expects the
+       engine checked out next to this repository (../BelotGameEngine), or set
+       BelotEngineDir. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <BelotEngineDir Condition="'$(BelotEngineDir)' == ''">$(MSBuildThisFileDirectory)../../../../BelotGameEngine</BelotEngineDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(BelotEngineDir)/src/Belot.Engine/Belot.Engine.csproj" />
+    <ProjectReference Include="$(BelotEngineDir)/src/AI/Belot.AI.ClaudePlayer/Belot.AI.ClaudePlayer.csproj" />
+    <ProjectReference Include="$(BelotEngineDir)/src/AI/Belot.AI.SmartPlayer/Belot.AI.SmartPlayer.csproj" />
+    <ProjectReference Include="$(BelotEngineDir)/src/AI/Belot.AI.DummyPlayer/Belot.AI.DummyPlayer.csproj" />
+  </ItemGroup>
+
+</Project>
