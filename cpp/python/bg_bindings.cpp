@@ -291,13 +291,14 @@ PYBIND11_MODULE(bg_cpp, m) {
 
     py::class_<BgBatchPlayEnv>(m, "BgBatchPlayEnv")
         .def(py::init([](int num_envs, std::uint64_t seed, double bid_noise, double hanging_prob, int threads,
-                         const std::string& mode, bool allow_double) {
+                         const std::string& mode, bool allow_double, const std::string& bid_model,
+                         double bid_model_prob) {
                  return new BgBatchPlayEnv(num_envs, seed, bid_noise, hanging_prob, threads, parseMode(mode),
-                                           allow_double);
+                                           allow_double, bid_model, bid_model_prob);
              }),
              py::arg("num_envs"), py::arg("seed") = 1, py::arg("bid_noise") = 0.0,
              py::arg("hanging_prob") = 0.0, py::arg("threads") = 8, py::arg("mode") = "all",
-             py::arg("allow_double") = false)
+             py::arg("allow_double") = false, py::arg("bid_model") = "", py::arg("bid_model_prob") = 0.65)
         .def_property_readonly("num_envs", &BgBatchPlayEnv::numEnvs)
         .def("reset_all", &BgBatchPlayEnv::resetAll, py::arg("seed"))
         .def("observe_batch",

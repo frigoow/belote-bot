@@ -169,9 +169,11 @@ def distill_fast_policy(
     save_bin: Path | None = None,
     mode: str = "all",
     allow_double: bool = False,
+    bid_model: str = "",
+    bid_model_prob: float = 0.65,
 ) -> BgFastPolicy:
     """Distill compact 256x128 BgFastPolicy from converged BgCardQGRU."""
-    print(f"\n--- Distilling 256x128 BgFastPolicy (mode={mode}) over {num_deals:,} deals (T={temperature}) ---", flush=True)
+    print(f"\n--- Distilling 256x128 BgFastPolicy (mode={mode}, dbl={allow_double}, bid={bid_model or 'nat'}) over {num_deals:,} deals (T={temperature}) ---", flush=True)
     q_model.eval()
     fast = BgFastPolicy().to(device)
     opt = torch.optim.AdamW(fast.parameters(), lr=1.5e-3, weight_decay=1e-4)
@@ -184,6 +186,8 @@ def distill_fast_policy(
         threads=12,
         mode=mode,
         allow_double=allow_double,
+        bid_model=bid_model,
+        bid_model_prob=bid_model_prob,
     )
     n_rounds = max(1, num_deals // batch_envs)
     idx_range = torch.arange(bgc.MAX_LEGAL, device=device).unsqueeze(0)
@@ -296,6 +300,9 @@ def main() -> None:
     ap.add_argument("--distill-deals", type=int, default=80000)
     ap.add_argument("--eval-every", type=int, default=250_000)
     ap.add_argument("--eval-decks", type=int, default=800)
+    ap.add_argument("--bid-model", type=str, default="", help="Optional BgBidModel .bin for generating realistic auctions")
+    ap.add_argument("--bid-model-prob", type=float, default=0.65, help="Fraction of deals bid by --bid-model (rest by naturalBidTuned)")
+    ap.add_argument("--init-from", type=Path, default=None, help="Warm-start Q/B weights only (fresh optimizer + fresh cosine schedule)")
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--save", type=Path, default=Path("checkpoints/bg_q_gru.pt"))
     ap.add_argument("--export-dir", type=Path, default=Path("checkpoints/bg_models"))
@@ -352,6 +359,13 @@ def main() -> None:
     best_belief_ce = 1e9
     start_round = 0
 
+    if args.init_from is not None and args.init_from.exists() and (args.resume is None or not args.resume.exists()):
+        ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
+        q_model.load_state_dict(ckpt["q_model"])
+        if b_model is not None and "b_model" in ckpt:
+            b_model.load_state_dict(ckpt["b_model"])
+        print(f"Warm-started Q/B weights from {args.init_from} (fresh optimizer + {args.episodes:,}-deal schedule)", flush=True)
+
     if args.resume is not None and args.resume.exists():
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         q_model.load_state_dict(ckpt["q_model"])
@@ -385,6 +399,8 @@ def main() -> None:
             save_bin=args.export_dir / "bg_fast_policy.bin",
             mode=args.mode,
             allow_double=args.allow_double,
+            bid_model=args.bid_model,
+            bid_model_prob=args.bid_model_prob,
         )
         ev_fp = eval_vs_cpp(
             fast_policy,
@@ -413,9 +429,12 @@ def main() -> None:
         threads=args.env_threads,
         mode=args.mode,
         allow_double=args.allow_double,
+        bid_model=args.bid_model,
+        bid_model_prob=args.bid_model_prob,
     )
     print(
-        f"Training mode={args.mode} allow_double={args.allow_double} hanging_prob={args.hanging_prob} "
+        f"Training mode={args.mode} allow_double={args.allow_double} bid_model={args.bid_model or 'nat'} "
+        f"(p={args.bid_model_prob}) hanging_prob={args.hanging_prob} "
         f"replay_rounds={args.replay_rounds} mb_per_round={args.mb_per_round}",
         flush=True,
     )
@@ -675,6 +694,8 @@ def main() -> None:
             save_bin=args.export_dir / "bg_fast_policy.bin",
             mode=args.mode,
             allow_double=args.allow_double,
+            bid_model=args.bid_model,
+            bid_model_prob=args.bid_model_prob,
         )
         ev_fp = eval_vs_cpp(
             fast_policy,

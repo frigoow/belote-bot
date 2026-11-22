@@ -10,11 +10,17 @@
 namespace bg {
 
 BgBatchPlayEnv::BgBatchPlayEnv(int num_envs, std::uint64_t seed, double bid_noise, double hanging_prob, int threads,
-                               ContractMode mode, bool allow_double)
+                               ContractMode mode, bool allow_double, const std::string& bid_model_path,
+                               double bid_model_prob)
     : num_envs_(num_envs), threads_(std::max(1, threads)), bid_noise_(bid_noise), hanging_prob_(hanging_prob),
-      mode_(mode), allow_double_(allow_double), rngs_(std::size_t(num_envs)), cached_legal_(std::size_t(num_envs)),
-      cached_n_legal_(std::size_t(num_envs), 0) {
+      mode_(mode), allow_double_(allow_double), bid_model_prob_(bid_model_prob), rngs_(std::size_t(num_envs)),
+      cached_legal_(std::size_t(num_envs)), cached_n_legal_(std::size_t(num_envs), 0) {
     if (num_envs <= 0) throw std::invalid_argument("BgBatchPlayEnv: num_envs must be > 0");
+    if (!bid_model_path.empty()) {
+        if (!bid_model_.load(bid_model_path)) {
+            throw std::runtime_error("BgBatchPlayEnv: failed to load bid model " + bid_model_path);
+        }
+    }
     resetAll(seed);
 }
 
@@ -32,22 +38,29 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
             hanging = kHangChoices[rng() % 5];
         }
         Round r(deck, first, hanging);
+        const bool use_bid_net = bid_model_.loaded() && (u(rng) < bid_model_prob_);
+        // On 15% of BgBidNet doubled deals, gently lower double_margin so Q-GRU gets rich
+        // exposure to realistic competitive doubled contracts without distorting normal auctions.
+        const double dbl_margin = (use_bid_net && allow_double_ && u(rng) < 0.15) ? -6.0 : 0.0;
         // Pick natural bidding tuning appropriate for the requested specialist contract mode
         // so acceptance is fast (~40-65%) while keeping every auction 100% natural.
         int at_bonus = 0;
         int nt_bonus = 0;
-        if (mode_ == ContractMode::kAll) {
-            at_bonus = (rng() & 1u) ? 8 : 0;
-        } else if (mode_ == ContractMode::kAllTrumps) {
-            at_bonus = 10;  // realistic aggressive AT tables (~60% AT, matching Master's 68% AT)
-        } else if (mode_ == ContractMode::kSuit) {
-            at_bonus = 0;
-        } else if (mode_ == ContractMode::kNoTrumps) {
-            at_bonus = -10;
-            nt_bonus = 6;
+        if (!use_bid_net) {
+            if (mode_ == ContractMode::kAll) {
+                at_bonus = (rng() & 1u) ? 8 : 0;
+            } else if (mode_ == ContractMode::kAllTrumps) {
+                at_bonus = 10;  // realistic aggressive AT tables (~60% AT, matching Master's 68% AT)
+            } else if (mode_ == ContractMode::kSuit) {
+                at_bonus = 0;
+            } else if (mode_ == ContractMode::kNoTrumps) {
+                at_bonus = -10;
+                nt_bonus = 6;
+            }
         }
         while (r.decision() == Round::Decision::kBid) {
-            std::uint8_t bid = naturalBidTuned(r, at_bonus, nt_bonus, allow_double_);
+            std::uint8_t bid = use_bid_net ? bid_model_.chooseBid(r, allow_double_, dbl_margin)
+                                           : naturalBidTuned(r, at_bonus, nt_bonus, allow_double_);
             if (bid_noise_ > 0.0 && u(rng) < bid_noise_) {
                 const std::uint8_t avail = r.availableBids();
                 std::uint8_t opts[9];

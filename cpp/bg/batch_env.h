@@ -9,12 +9,14 @@
 // skipping passed-out deals). Each env resets immediately on deal finish.
 
 #include "bg/bg.h"
+#include "bg/bid_model.h"
 #include "bg/encoder.h"
 #include "bg/view.h"
 
 #include <array>
 #include <cstdint>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace bg {
@@ -29,7 +31,8 @@ enum class ContractMode : int {
 class BgBatchPlayEnv {
 public:
     BgBatchPlayEnv(int num_envs, std::uint64_t seed = 1, double bid_noise = 0.0, double hanging_prob = 0.0,
-                   int threads = 8, ContractMode mode = ContractMode::kAll, bool allow_double = false);
+                   int threads = 8, ContractMode mode = ContractMode::kAll, bool allow_double = false,
+                   const std::string& bid_model_path = "", double bid_model_prob = 0.65);
 
     int numEnvs() const { return num_envs_; }
 
@@ -68,6 +71,8 @@ private:
     double hanging_prob_ = 0.0;
     ContractMode mode_ = ContractMode::kAll;
     bool allow_double_ = false;
+    double bid_model_prob_ = 0.65;
+    BgBidModel bid_model_;
     std::vector<std::mt19937_64> rngs_;
     std::vector<Round> deals_;
     std::vector<std::array<std::int32_t, kBgMaxLegal>> cached_legal_;
