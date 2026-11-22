@@ -458,8 +458,8 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     const bool fast_play_weight = use_fast && o.fast_lik_weight > 0.0 && !ps.plays.empty();
     const bool bid_weight = o.auction_weight > 0.0 && !ps.bids.empty();
     const bool neural_bid_weight = o.bid_model != nullptr && o.bid_model->loaded() &&
-                                   o.neural_auction_weight > 0.0 && !ps.bids.empty();
-    const bool weighted = rule_play_weight || fast_play_weight || bid_weight || neural_bid_weight;
+                                   o.neural_auction_weight > 0.0 && !ps.bids.empty() && ps.plays.size() < 16;
+    const bool weighted = rule_play_weight || fast_play_weight || bid_weight;
 
     // Precompute Belief-DP per-card weights once at the root (~0.14 ms) if BgBeliefModel is loaded.
     std::array<std::array<double, 3>, kCards> belief_weights{};
@@ -472,10 +472,6 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
         if (rule_play_weight) lw += double(policyMismatches(ps, h)) * std::log(std::max(o.lik_eps, 1e-12));
         if (fast_play_weight) lw += o.fast_lik_weight * fastPlayLogLik(ps, h, *fast_ptr, o.fast_lik_temp);
         if (bid_weight) lw += o.auction_weight * auctionLogLik(ps, h);
-        if (neural_bid_weight) {
-            lw += o.neural_auction_weight *
-                  o.bid_model->auctionLogLik(ps, h, true, o.neural_auction_temp, o.neural_auction_subsets);
-        }
         return lw;
     };
 
@@ -606,6 +602,22 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     }
 
     const std::size_t nw = bases.size();
+    // Apply neural auction importance re-weighting once on the deduplicated <=192 surviving worlds
+    // during Tricks 1-4 (where auction info dominates) instead of on the 3x oversampled pool!
+    if (neural_bid_weight && nw > 1) {
+        std::vector<double> nlw(nw, 0.0);
+        double max_nlw = -1e18;
+        for (std::size_t i = 0; i < nw; ++i) {
+            Hands hi{};
+            for (int p = 0; p < kPlayers; ++p) hi[static_cast<std::size_t>(p)] = bases[i].hand(p);
+            nlw[i] = o.neural_auction_weight *
+                     o.bid_model->auctionLogLik(ps, hi, true, o.neural_auction_temp, o.neural_auction_subsets);
+            if (nlw[i] > max_nlw) max_nlw = nlw[i];
+        }
+        for (std::size_t i = 0; i < nw; ++i) {
+            wts[i] *= std::exp(std::max(-20.0, nlw[i] - max_nlw));
+        }
+    }
     const Round& any = bases[0];
     const Mask legal = any.legalMoves();
 
