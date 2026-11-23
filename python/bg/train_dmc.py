@@ -31,6 +31,7 @@ import torch.nn.functional as F
 import bg_cpp as bgc
 from bg.eval_bg import eval_belief_per_trick, eval_vs_cpp
 from bg.models import BgBeliefNet, BgCardQGRU, BgFastPolicy
+from bg.suit_perm import SuitPermuter
 
 MAX_DECISIONS = 28  # Trick 8 (4 cards) is always auto-played by bg::Round.
 
@@ -171,9 +172,10 @@ def distill_fast_policy(
     allow_double: bool = False,
     bid_model: str = "",
     bid_model_prob: float = 0.65,
+    suit_perm: bool = False,
 ) -> BgFastPolicy:
     """Distill compact 256x128 BgFastPolicy from converged BgCardQGRU."""
-    print(f"\n--- Distilling 256x128 BgFastPolicy (mode={mode}, dbl={allow_double}, bid={bid_model or 'nat'}) over {num_deals:,} deals (T={temperature}) ---", flush=True)
+    print(f"\n--- Distilling 256x128 BgFastPolicy (mode={mode}, dbl={allow_double}, suit_perm={suit_perm}, bid={bid_model or 'nat'}) over {num_deals:,} deals (T={temperature}) ---", flush=True)
     q_model.eval()
     fast = BgFastPolicy().to(device)
     opt = torch.optim.AdamW(fast.parameters(), lr=1.5e-3, weight_decay=1e-4)
@@ -245,6 +247,7 @@ def distill_fast_policy(
     mb = 2048
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs * math.ceil(ds_n / mb))
     rng = np.random.default_rng(1)
+    permuter = SuitPermuter(mode, device) if suit_perm else None
     fast.train()
     for ep in range(epochs):
         perm = rng.permutation(ds_n)
@@ -255,6 +258,11 @@ def distill_fast_policy(
             xb = torch.from_numpy(X[idx]).to(device)
             mb_t = torch.from_numpy(M[idx]).to(device)
             yb = torch.from_numpy(Y[idx]).to(device)
+            if permuter is not None:
+                pid = permuter.sample_perm_ids(xb.shape[0], device)
+                xb = permuter.permute_state(xb, pid)
+                mb_t = permuter.permute_cards_1d(mb_t, pid)
+                yb = permuter.permute_cards_1d(yb, pid)
             logits = fast(xb).masked_fill(mb_t == 0, -1e9)
             log_p = F.log_softmax(logits, dim=-1)
             loss = -(yb * log_p).sum(dim=-1).mean()
@@ -279,6 +287,7 @@ def distill_fast_policy(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=("all", "suit", "nt", "at"), default="all")
+    ap.add_argument("--suit-perm", action="store_true", help="Enable exact S_3 (Suit, trump pinned at 0) / S_4 (AT/NT) suit-permutation augmentation")
     ap.add_argument("--allow-double", action="store_true", help="Allow Double/Redouble during training (off for clean single-hand Manille mode)")
     ap.add_argument("--hanging-prob", type=float, default=0.0)
     ap.add_argument("--episodes", type=int, default=5_000_000)
@@ -401,6 +410,7 @@ def main() -> None:
             allow_double=args.allow_double,
             bid_model=args.bid_model,
             bid_model_prob=args.bid_model_prob,
+            suit_perm=args.suit_perm,
         )
         ev_fp = eval_vs_cpp(
             fast_policy,
@@ -432,8 +442,10 @@ def main() -> None:
         bid_model=args.bid_model,
         bid_model_prob=args.bid_model_prob,
     )
+    permuter = SuitPermuter(args.mode, device) if args.suit_perm else None
     print(
-        f"Training mode={args.mode} allow_double={args.allow_double} bid_model={args.bid_model or 'nat'} "
+        f"Training mode={args.mode} suit_perm={args.suit_perm} (P={permuter.num_perms if permuter else 1}) "
+        f"allow_double={args.allow_double} bid_model={args.bid_model or 'nat'} "
         f"(p={args.bid_model_prob}) hanging_prob={args.hanging_prob} "
         f"replay_rounds={args.replay_rounds} mb_per_round={args.mb_per_round}",
         flush=True,
@@ -559,10 +571,18 @@ def main() -> None:
                 nl_mb = nl_f[mb_idx]
                 ch_mb = chosen_f[mb_idx]
                 ret_mb = ret_f[mb_idx]
+                bt_mb_aug = bt_f[mb_idx] if bt_f is not None else None
+                if permuter is not None:
+                    pid = permuter.sample_perm_ids(s_mb.shape[0], device)
+                    s_mb = permuter.permute_state(s_mb, pid)
+                    h_mb = permuter.permute_history(h_mb, pid)
+                    a_mb = permuter.permute_actions(a_mb, pid)
+                    if bt_mb_aug is not None:
+                        bt_mb_aug = permuter.permute_cards_1d(bt_mb_aug, pid)
                 valid_a = idx_range < nl_mb.unsqueeze(1)
 
                 with _autocast(device):
-                    if args.aux_own_coef > 0.0 and bt_f is not None:
+                    if args.aux_own_coef > 0.0 and bt_mb_aug is not None:
                         q_all, own_logits = q_model(s_mb, a_mb, h_mb, np_mb, valid_mask=valid_a, return_aux_own=True)
                     else:
                         q_all = q_model(s_mb, a_mb, h_mb, np_mb, valid_mask=valid_a)
@@ -572,9 +592,8 @@ def main() -> None:
                 q_mse = F.mse_loss(q_taken, ret_mb)
                 loss = q_mse
 
-                if own_logits is not None and bt_f is not None:
-                    bt_mb = bt_f[mb_idx]
-                    own_ce = F.cross_entropy(own_logits.float().reshape(-1, 3), bt_mb.reshape(-1), ignore_index=-1)
+                if own_logits is not None and bt_mb_aug is not None:
+                    own_ce = F.cross_entropy(own_logits.float().reshape(-1, 3), bt_mb_aug.reshape(-1), ignore_index=-1)
                     loss = loss + args.aux_own_coef * own_ce
                     own_loss_sum += float(own_ce.item())
 
@@ -600,9 +619,20 @@ def main() -> None:
                     b_sched_list.append((h_len, perm[start : start + args.batch_size]))
             for oi in rng.permutation(len(b_sched_list)):
                 h_len, mb_idx = b_sched_list[int(oi)]
+                bs_mb = states_new[mb_idx]
+                bh_mb = hists_new[mb_idx, :h_len, :]
+                bnp_mb = nplies_new[mb_idx]
+                bm_mb = bm_new[mb_idx]
+                bt_mb = bt_new[mb_idx]
+                if permuter is not None:
+                    pid = permuter.sample_perm_ids(bs_mb.shape[0], device)
+                    bs_mb = permuter.permute_state(bs_mb, pid)
+                    bh_mb = permuter.permute_history(bh_mb, pid)
+                    bm_mb = permuter.permute_cards_2d(bm_mb, pid)
+                    bt_mb = permuter.permute_cards_1d(bt_mb, pid)
                 with _autocast(device):
-                    b_logits = b_model(states_new[mb_idx], hists_new[mb_idx, :h_len, :], nplies_new[mb_idx], bm_new[mb_idx])
-                b_ce = F.cross_entropy(b_logits.float().reshape(-1, 3), bt_new[mb_idx].reshape(-1), ignore_index=-1)
+                    b_logits = b_model(bs_mb, bh_mb, bnp_mb, bm_mb)
+                b_ce = F.cross_entropy(b_logits.float().reshape(-1, 3), bt_mb.reshape(-1), ignore_index=-1)
                 b_opt.zero_grad(set_to_none=True)
                 b_ce.backward()
                 torch.nn.utils.clip_grad_norm_(b_model.parameters(), 2.0)
@@ -696,6 +726,7 @@ def main() -> None:
             allow_double=args.allow_double,
             bid_model=args.bid_model,
             bid_model_prob=args.bid_model_prob,
+            suit_perm=args.suit_perm,
         )
         ev_fp = eval_vs_cpp(
             fast_policy,

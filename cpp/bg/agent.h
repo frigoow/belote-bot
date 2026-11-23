@@ -26,6 +26,8 @@
 
 namespace bg {
 
+class BgBidModel;
+
 // Optional pre-deal match score context for exact 151-point Match-Equity leaves.
 struct MatchContext {
     bool enabled = false;
@@ -49,7 +51,7 @@ struct EndgameResult {
     std::vector<std::pair<int, int>> move_values;
     long nodes = 0;
 };
-EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx = {});
+EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx = {}, bool raw_tiebreak = false);
 int solveEndgameValue(const Round& r, int team, const MatchContext& match_ctx = {});
 
 struct NeuralSuite {
@@ -74,12 +76,18 @@ struct SearchOptions {
     const BgFastPolicyModel* fast_policy = nullptr;
     const BgBeliefModel* belief_model = nullptr;
     const BgQGRUModel* q_model = nullptr;
+    const BgBidModel* bid_model = nullptr;
     NeuralSuite suit_models;
     NeuralSuite nt_models;
     NeuralSuite at_models;
     double belief_temp = 1.0;
     double fast_lik_weight = 0.0;
     double fast_lik_temp = 1.0;
+    double neural_auction_weight = 0.0;
+    double neural_auction_temp = 5.0;
+    int neural_auction_subsets = 2;
+    bool raw_tiebreak = false;   // break exact-endgame rounded game-point ties by raw card-point margin
+    int exact_worlds = 0;        // >0: cap worlds used when solving root exact (keeps Trick 3 fast!)
     double q_blend = 0.0;
     int q_taper_trick = 6;
     bool race = false;

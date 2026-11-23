@@ -40,9 +40,6 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
         }
         Round r(deck, first, hanging);
         const bool use_bid_net = bid_model_.loaded() && (u(rng) < bid_model_prob_);
-        // On 15% of BgBidNet doubled deals, gently lower double_margin so Q-GRU gets rich
-        // exposure to realistic competitive doubled contracts without distorting normal auctions.
-        const double dbl_margin = (use_bid_net && allow_double_ && u(rng) < 0.15) ? -6.0 : 0.0;
         // Pick natural bidding tuning appropriate for the requested specialist contract mode
         // so acceptance is fast (~40-65%) while keeping every auction 100% natural.
         int at_bonus = 0;
@@ -60,7 +57,7 @@ Round BgBatchPlayEnv::makeFreshDeal(std::mt19937_64& rng) const {
             }
         }
         while (r.decision() == Round::Decision::kBid) {
-            std::uint8_t bid = use_bid_net ? bid_model_.chooseBid(r, allow_double_, dbl_margin)
+            std::uint8_t bid = use_bid_net ? bid_model_.chooseBid(r, allow_double_, 0.0)
                                            : naturalBidTuned(r, at_bonus, nt_bonus, allow_double_);
             if (bid_noise_ > 0.0 && u(rng) < bid_noise_) {
                 const std::uint8_t avail = r.availableBids();
@@ -251,7 +248,11 @@ void BgBatchPlayEnv::stepBatch(const std::int32_t* action_idx, std::uint8_t* don
             if (r.finished()) {
                 done_out[b] = 1;
                 const RoundResult& res = r.result();
-                reward_t0_out[b] = float(res.sn - res.ew) / 40.0f;
+                // Normalize doubled (x2) / redoubled (x4) payouts by the contract multiplier so
+                // card play still optimizes exact winner-takes-all without 4x/16x MSE gradient spikes!
+                const std::uint8_t c = r.contract();
+                const float mult = (c & kReDouble) ? 4.0f : ((c & kDouble) ? 2.0f : 1.0f);
+                reward_t0_out[b] = float(res.sn - res.ew) / (40.0f * mult);
                 if (auto_reset) {
                     deals_[std::size_t(b)] = makeFreshDeal(rngs_[std::size_t(b)]);
                     cacheLegal(b);

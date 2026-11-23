@@ -1,4 +1,5 @@
 #include "bg/agent.h"
+#include "bg/bid_model.h"
 #include "cardbot/search.h"
 #include "bg/match_equity.h"
 #include "bg/rule_policy.h"
@@ -31,7 +32,7 @@ enum class Bound : std::uint8_t { kNone = 0, kExact = 1, kLower = 2, kUpper = 3 
 struct TTEntry {
     std::uint64_t key = 0;
     std::uint32_t gen = 0;
-    std::int16_t score = 0;
+    std::int32_t score = 0;
     std::int8_t best_move = -1;
     Bound bound = Bound::kNone;
 };
@@ -118,25 +119,29 @@ Mask pruneEquivalent(Mask legal, Mask in_play, std::uint8_t contract) {
 }
 
 struct Endgame {
+    static constexpr int kRawScale = 512;
     std::uint8_t contract;
     int declarer, hanging, trump;
-    bool all, none;
+    bool all, none, doubled, raw_tiebreak;
     MatchContext match_ctx;
     const BgZobrist& z;
     TTEntry* tt;
     std::size_t tt_mask;
     std::uint32_t gen;
+    int killer[32][2]{};
     long nodes = 0;
 
-    Endgame(std::uint8_t c, int decl, int hang, int tt_log2, const MatchContext& mc)
+    Endgame(std::uint8_t c, int decl, int hang, int tt_log2, const MatchContext& mc, bool raw_tb = false)
         : contract(c), declarer(decl), hanging(hang), trump(trumpSuit(c)), all((c & kAllTrumps) != 0),
-          none((c & kNoTrumps) != 0), match_ctx(mc), z(bgZobrist()) {
+          none((c & kNoTrumps) != 0), doubled((c & (kDouble | kReDouble)) != 0),
+          raw_tiebreak(raw_tb && !mc.enabled), match_ctx(mc), z(bgZobrist()) {
         const std::size_t sz = std::size_t(1) << std::max(8, std::min(20, tt_log2));
         TTStorage& st = threadBgTT();
         st.prepare(sz);
         tt = st.table.data();
         tt_mask = sz - 1;
         gen = st.gen;
+        for (int i = 0; i < 32; ++i) killer[i][0] = killer[i][1] = -1;
     }
 
     struct State {
@@ -145,46 +150,113 @@ struct Endgame {
         int current = 0;
         std::array<Mask, 2> won{};
         std::array<int, 2> raw{};  // card points won, declarations, belotes, last 10
+        int rem_card_pts = 0;      // sum of cardValue() of all cards currently in hands_ + t
         std::uint64_t hands_hash = 0;
     };
 
-    int terminal(const State& s) const {
-        const RoundResult r = finalizeScore(contract, declarer, s.raw[0], s.raw[1], s.won[0] == 0, s.won[1] == 0, hanging);
+    int scoreFrom(int raw0, int raw1, bool no_tricks0, bool no_tricks1) const {
+        const RoundResult r = finalizeScore(contract, declarer, raw0, raw1, no_tricks0, no_tricks1, hanging);
         if (match_ctx.enabled) {
             const double eq0 = MatchEquityTable::instance().postDealEquity(
                 match_ctx.sn_before, match_ctx.ew_before, match_ctx.first_before, contract, r, 0);
-            // Zero-sum tie-breaker by deal margin when match equity saturates at 0.0 or 1.0!
-            // v0 in [-300, 9900], exact team-1 complement is 9600 - v0.
             const int tie = std::clamp(r.sn - r.ew, -150, 150) * 2;
             return int(std::lround(eq0 * 9600.0)) + tie;
         }
-        return r.sn - r.ew;
-    }
-
-    int movePriority(int c, const State& s, int tt_move) const {
-        if (c == tt_move) return 10000;
-        int p = cardValue(c, contract) * 4;
-        if (!all && !none && suitOf(c) == trump) p += 60 + trumpOrder(c) * 2;
-        else if (all) p += trumpOrder(c) * 2;
-        else p += plainOrder(c) * 2;
-        if (s.t.n > 0) {
-            Trick u = s.t;
-            u.cards[u.n] = c;
-            u.players[u.n] = s.current;
-            ++u.n;
-            if (trickWinnerIndex(contract, u) == s.t.n) p += 200;
+        const int gm = r.sn - r.ew;
+        if (raw_tiebreak) {
+            return gm * kRawScale + std::clamp(raw0 - raw1, -250, 250);
         }
-        return p;
+        return gm;
     }
 
-    // Team-0 value with alpha-beta + Zobrist TT + 0-pt equivalence pruning.
-    int search(const State& s, int alpha, int beta) {
+    int terminal(const State& s) const {
+        return scoreFrom(s.raw[0], s.raw[1], s.won[0] == 0, s.won[1] == 0);
+    }
+
+    // Upper bound on additional Belote points a team could still claim in remaining hands.
+    int maxPossibleBelotes(const State& s, int team) const {
+        if (none) return 0;
+        int bonus = 0;
+        for (int p = team; p < kPlayers; p += 2) {
+            const Mask h = s.hands[std::size_t(p)];
+            if (all) {
+                for (int su = 0; su < 4; ++su) {
+                    const Mask kq = bit(cardOf(su, belote::kQ)) | bit(cardOf(su, belote::kK));
+                    if ((h & kq) == kq) bonus += 20;
+                }
+            } else {
+                const Mask kq = bit(cardOf(trump, belote::kQ)) | bit(cardOf(trump, belote::kK));
+                if ((h & kq) == kq) bonus += 20;
+            }
+        }
+        return bonus;
+    }
+
+    // Fast 1-card last-trick completion (zero choices on Trick 8!).
+    int finishLastTrick(State s) const {
+        for (int i = 0; i < kPlayers; ++i) {
+            const int p = s.current;
+            const int c = lowestCard(s.hands[std::size_t(p)]);
+            s.hands[std::size_t(p)] = 0;
+            s.t.cards[i] = c;
+            s.t.players[i] = p;
+            s.current = nextSeat(p);
+        }
+        s.t.n = kPlayers;
+        const int w = s.t.players[trickWinnerIndex(contract, s.t)];
+        const int team = teamOf(w);
+        for (int i = 0; i < kPlayers; ++i) {
+            s.won[std::size_t(team)] |= bit(s.t.cards[i]);
+            s.raw[std::size_t(team)] += cardValue(s.t.cards[i], contract);
+        }
+        s.raw[std::size_t(team)] += 10;
+        return terminal(s);
+    }
+
+    int movePriority(int c, const State& s, int tt_move, int ply, int cur_winner_team) const {
+        if (c == tt_move) return 10000;
+        if (c == killer[ply][0]) return 5000;
+        if (c == killer[ply][1]) return 4000;
+        const int pts = cardValue(c, contract);
+        const int ord = (all || (!none && suitOf(c) == trump)) ? trumpOrder(c) : plainOrder(c);
+        if (s.t.n == 0) {
+            int p = pts * 3 + ord * 2;
+            if (!all && !none && suitOf(c) == trump) p += 40;
+            return p;
+        }
+        Trick u = s.t;
+        u.cards[u.n] = c;
+        u.players[u.n] = s.current;
+        ++u.n;
+        const bool wins = (trickWinnerIndex(contract, u) == s.t.n);
+        if (wins) {
+            return 200 + (s.t.n == 3 ? pts * 4 : ord * 2 + pts);
+        }
+        const bool partner_wins = (cur_winner_team == teamOf(s.current));
+        return partner_wins ? (80 + pts * 5) : (-pts * 8 - ord * 2);
+    }
+
+    // Team-0 value with PVS alpha-beta + Zobrist TT + score-bound cutoffs + killers + 0-pt pruning.
+    int search(const State& s, int alpha, int beta, int ply) {
         ++nodes;
         const bool maxing = teamOf(s.current) == 0;
         int tt_move = -1;
         std::uint64_t tt_key = 0;
         const bool use_tt = (s.t.n == 0);
         if (use_tt) {
+            if ((s.hands[0] & (s.hands[0] - 1)) == 0) {
+                return finishLastTrick(s);
+            }
+
+            // Exact optimistic/pessimistic score-bound cutoffs (100% exact, zero approximation!).
+            const int rem0 = s.rem_card_pts + 10 + maxPossibleBelotes(s, 0);
+            const int rem1 = s.rem_card_pts + 10 + maxPossibleBelotes(s, 1);
+            const int hi0 = scoreFrom(s.raw[0] + rem0, s.raw[1], false, s.won[1] == 0);
+            if (hi0 <= alpha) return hi0;
+            const int lo0 = scoreFrom(s.raw[0], s.raw[1] + rem1, s.won[0] == 0, false);
+            if (lo0 >= beta) return lo0;
+            if (hi0 == lo0) return hi0;
+
             const int cm = (s.won[0] == 0 ? 1 : 0) | (s.won[1] == 0 ? 2 : 0);
             tt_key = s.hands_hash ^ z.leader[s.current] ^ z.capot[cm] ^
                      mix64(std::uint64_t(std::uint32_t(s.raw[0])) | (std::uint64_t(std::uint32_t(s.raw[1])) << 32));
@@ -204,16 +276,17 @@ struct Endgame {
         for (int i = 0; i < s.t.n; ++i) in_play |= bit(s.t.cards[i]);
         const Mask pruned = chosen ? pruneEquivalent(legal, in_play, contract) : legal;
 
+        const int cur_w_team = s.t.n > 0 ? teamOf(s.t.players[trickWinnerIndex(contract, s.t)]) : -1;
+        const int p_idx = std::min(ply, 31);
         int moves[8]{};
         int prio[8]{};
         int nm = 0;
         for (Mask m = pruned; m; m &= m - 1) {
             const int c = lowestCard(m);
             moves[nm] = c;
-            prio[nm] = movePriority(c, s, tt_move);
+            prio[nm] = movePriority(c, s, tt_move, p_idx, cur_w_team);
             ++nm;
         }
-        // Simple insertion sort (nm <= 8).
         for (int i = 1; i < nm; ++i) {
             const int mc = moves[i], mp = prio[i];
             int j = i - 1;
@@ -232,7 +305,19 @@ struct Endgame {
         for (int i = 0; i < nm; ++i) {
             const int c = moves[i];
             State n = s;
-            const int v = apply(n, c, chosen) ? terminal(n) : search(n, alpha, beta);
+            int v;
+            if (apply(n, c, chosen)) {
+                v = terminal(n);
+            } else if (i == 0 || alpha + 1 >= beta) {
+                v = search(n, alpha, beta, ply + 1);
+            } else if (maxing) {
+                v = search(n, alpha, alpha + 1, ply + 1);
+                if (v > alpha && v < beta) v = search(n, v, beta, ply + 1);
+            } else {
+                v = search(n, beta - 1, beta, ply + 1);
+                if (v < beta && v > alpha) v = search(n, alpha, v, ply + 1);
+            }
+
             if (maxing) {
                 if (v > best) {
                     best = v;
@@ -246,14 +331,20 @@ struct Endgame {
                 }
                 beta = std::min(beta, v);
             }
-            if (alpha >= beta) break;
+            if (alpha >= beta) {
+                if (c != tt_move && c != killer[p_idx][0]) {
+                    killer[p_idx][1] = killer[p_idx][0];
+                    killer[p_idx][0] = c;
+                }
+                break;
+            }
         }
 
-        if (use_tt && best >= -32000 && best <= 32000) {
+        if (use_tt) {
             TTEntry& e = tt[tt_key & tt_mask];
             e.key = tt_key;
             e.gen = gen;
-            e.score = std::int16_t(best);
+            e.score = std::int32_t(best);
             e.best_move = std::int8_t(best_card);
             if (best <= orig_alpha) e.bound = Bound::kUpper;
             else if (best >= orig_beta) e.bound = Bound::kLower;
@@ -276,10 +367,13 @@ struct Endgame {
         }
         const int w = s.t.players[trickWinnerIndex(contract, s.t)];
         const int team = teamOf(w);
+        int t_pts = 0;
         for (int i = 0; i < kPlayers; ++i) {
             s.won[std::size_t(team)] |= bit(s.t.cards[i]);
-            s.raw[std::size_t(team)] += cardValue(s.t.cards[i], contract);
+            t_pts += cardValue(s.t.cards[i], contract);
         }
+        s.raw[std::size_t(team)] += t_pts;
+        s.rem_card_pts -= t_pts;
         s.t = Trick{};
         s.current = w;
         if (s.hands[std::size_t(w)] == 0) {
@@ -293,9 +387,14 @@ struct Endgame {
         State s;
         for (int p = 0; p < kPlayers; ++p) {
             s.hands[std::size_t(p)] = r.hand(p);
-            for (Mask m = s.hands[std::size_t(p)]; m; m &= m - 1) s.hands_hash ^= z.card[p][lowestCard(m)];
+            for (Mask m = s.hands[std::size_t(p)]; m; m &= m - 1) {
+                const int c = lowestCard(m);
+                s.hands_hash ^= z.card[p][c];
+                s.rem_card_pts += cardValue(c, r.contract());
+            }
         }
         s.t = r.trick();
+        for (int i = 0; i < s.t.n; ++i) s.rem_card_pts += cardValue(s.t.cards[i], r.contract());
         s.current = r.toMove();
         for (int tm = 0; tm < 2; ++tm) {
             s.won[std::size_t(tm)] = r.won(tm);
@@ -309,11 +408,11 @@ struct Endgame {
 
 }  // namespace
 
-EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx) {
+EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_ctx, bool raw_tiebreak) {
     if (r.decision() != Round::Decision::kPlay || r.trickNumber() < 2)
         throw std::logic_error("solveEndgame: needs a card decision from trick 2 on");
-    const int tt_log2 = r.trickNumber() <= 4 ? 18 : 14;
-    Endgame e(r.contract(), r.contractPlayer(), r.hangingBefore(), tt_log2, match_ctx);
+    const int tt_log2 = r.trickNumber() <= 3 ? 19 : (r.trickNumber() == 4 ? 18 : 14);
+    Endgame e(r.contract(), r.contractPlayer(), r.hangingBefore(), tt_log2, match_ctx, raw_tiebreak);
     const Endgame::State s = e.initState(r);
 
     const Mask legal = r.legalMoves();
@@ -329,7 +428,7 @@ EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_c
     for (Mask m = unique_legal; m; m &= m - 1) {
         const int c = lowestCard(m);
         Endgame::State n = s;
-        const int v0 = e.apply(n, c, chosen) ? e.terminal(n) : e.search(n, -kInf, kInf);
+        const int v0 = e.apply(n, c, chosen) ? e.terminal(n) : e.search(n, -kInf, kInf, 1);
         const int v = (team == 0) ? v0 : (match_ctx.enabled ? (9600 - v0) : -v0);
         score_by_card[c] = v;
         best = maxing_team ? std::max(best, v) : std::min(best, v);
@@ -355,10 +454,10 @@ EndgameResult solveEndgame(const Round& r, int team, const MatchContext& match_c
 int solveEndgameValue(const Round& r, int team, const MatchContext& match_ctx) {
     if (r.decision() != Round::Decision::kPlay || r.trickNumber() < 2)
         throw std::logic_error("solveEndgameValue: needs a card decision from trick 2 on");
-    const int tt_log2 = r.trickNumber() <= 4 ? 17 : 12;
-    Endgame e(r.contract(), r.contractPlayer(), r.hangingBefore(), tt_log2, match_ctx);
+    const int tt_log2 = r.trickNumber() <= 3 ? 18 : (r.trickNumber() == 4 ? 17 : 12);
+    Endgame e(r.contract(), r.contractPlayer(), r.hangingBefore(), tt_log2, match_ctx, false);
     const Endgame::State s = e.initState(r);
-    const int v0 = e.search(s, -kInf, kInf);
+    const int v0 = e.search(s, -kInf, kInf, 0);
     return (team == 0) ? v0 : (match_ctx.enabled ? (9600 - v0) : -v0);
 }
 
@@ -495,6 +594,8 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     const bool rule_play_weight = o.lik_eps < 1.0 && !ps.plays.empty();
     const bool fast_play_weight = use_fast && o.fast_lik_weight > 0.0 && !ps.plays.empty();
     const bool bid_weight = o.auction_weight > 0.0 && !ps.bids.empty();
+    const bool neural_bid_weight = o.bid_model != nullptr && o.bid_model->loaded() &&
+                                   o.neural_auction_weight > 0.0 && !ps.bids.empty() && ps.plays.size() < 16;
     const bool weighted = rule_play_weight || fast_play_weight || bid_weight;
 
     // Precompute Belief-DP per-card weights once at the root (~0.14 ms) if BgBeliefModel is loaded.
@@ -517,7 +618,23 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     wo.shuffle = o.race;
     cardbot::WorldSet<Round> ws = cardbot::drawWorlds<Round>(source, wo, rng);
     const std::vector<Round>& bases = ws.states;
-    const std::size_t nw = bases.size();
+    std::size_t nw = bases.size();
+    // Apply neural auction importance re-weighting once on the deduplicated <=192 surviving worlds
+    // during Tricks 1-4 (where auction info dominates) instead of on the 3x oversampled pool!
+    if (neural_bid_weight && nw > 1) {
+        std::vector<double> nlw(nw, 0.0);
+        double max_nlw = -1e18;
+        for (std::size_t i = 0; i < nw; ++i) {
+            Hands hi{};
+            for (int p = 0; p < kPlayers; ++p) hi[static_cast<std::size_t>(p)] = bases[i].hand(p);
+            nlw[i] = o.neural_auction_weight *
+                     o.bid_model->auctionLogLik(ps, hi, true, o.neural_auction_temp, o.neural_auction_subsets);
+            if (nlw[i] > max_nlw) max_nlw = nlw[i];
+        }
+        for (std::size_t i = 0; i < nw; ++i) {
+            ws.weights[i] *= std::exp(std::max(-20.0, nlw[i] - max_nlw));
+        }
+    }
     const Round& any = bases[0];
     const Mask legal = any.legalMoves();
 
@@ -552,11 +669,20 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     const std::size_t nm = moves.size();
     const bool exact = any.trickNumber() >= o.root_exact_trick && any.trickNumber() >= 2;
 
+    // Late in the deal the root is solved exactly; in tricks 1-3 on at most exact_worlds worlds
+    // (the evaluated worlds are the first ones, so the statistics run over exactly those).
+    if (exact && o.exact_worlds > 0 && !ws.enumerated && any.trickNumber() <= 3 && nw > std::size_t(o.exact_worlds)) {
+        nw = std::size_t(o.exact_worlds);
+        ws.states.resize(nw, bases[0]);
+        ws.weights.resize(nw);
+    }
+
     // Each move on each world: exact from the root late in the deal, else a play-out.
     auto evaluate = [&](std::size_t w, const std::vector<char>& alive, std::vector<double>& val) {
         if (exact) {
-            const EndgameResult er = solveEndgame(bases[w], team, match_ctx);
-            const double scale = match_ctx.enabled ? (1.0 / 96.0) : 1.0;
+            const EndgameResult er = solveEndgame(bases[w], team, match_ctx, o.raw_tiebreak);
+            const double scale = match_ctx.enabled ? (1.0 / 96.0)
+                                                   : (o.raw_tiebreak ? (1.0 / double(Endgame::kRawScale)) : 1.0);
             for (std::size_t i = 0; i < nm; ++i)
                 for (const auto& [c, v] : er.move_values)
                     if (c == moves[i]) val[i * nw + w] = double(v) * scale;

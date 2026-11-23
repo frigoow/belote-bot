@@ -1,5 +1,6 @@
 #include "bg/bid_model.h"
 #include "bg/agent.h"
+#include "bg/match_equity.h"
 #include "bg/rule_policy.h"
 
 #include <algorithm>
@@ -342,6 +343,307 @@ std::uint8_t BgBidModel::chooseBid(const BidPublicState& bs, bool allow_double, 
 
 std::uint8_t BgBidModel::chooseBid(const Round& r, bool allow_double, double double_margin) const {
     return chooseBid(bidPublicState(r), allow_double, double_margin);
+}
+
+std::uint8_t BgBidModel::chooseBidMatchEquity(const BidPublicState& bs, bool allow_double, double double_margin,
+                                              const BidMatchEquityOptions& me_opts, std::mt19937_64& rng) const {
+    if (!me_opts.enabled || me_opts.worlds <= 0 ||
+        (std::max(bs.sn, bs.ew) < me_opts.min_score && bs.hanging <= 0)) {
+        return chooseBid(bs, allow_double, double_margin);
+    }
+
+    std::array<double, kBgNumBids> q_pts{};
+    const std::uint16_t mask = evalBids(bs, allow_double, q_pts);
+
+    // Collect candidate bids: always Pass (0) + top_k non-pass bids by Q
+    // + Double/Redouble if legal and within dbl_window of best Q.
+    std::vector<int> non_pass;
+    double best_q = q_pts[0];
+    for (int i = 1; i < kBgNumBids; ++i) {
+        if (!(mask & (1u << i))) continue;
+        if (q_pts[static_cast<std::size_t>(i)] > best_q) best_q = q_pts[static_cast<std::size_t>(i)];
+        non_pass.push_back(i);
+    }
+    if (non_pass.empty()) return kPass;
+
+    std::sort(non_pass.begin(), non_pass.end(),
+              [&](int a, int b) { return q_pts[static_cast<std::size_t>(a)] > q_pts[static_cast<std::size_t>(b)]; });
+
+    std::vector<int> cands;
+    cands.push_back(0);  // Pass is always a candidate
+    const int k_lim = std::min(int(non_pass.size()), std::max(1, me_opts.top_k));
+    for (int k = 0; k < k_lim; ++k) cands.push_back(non_pass[static_cast<std::size_t>(k)]);
+    for (int i = 7; i < kBgNumBids; ++i) {
+        if (!(mask & (1u << i))) continue;
+        if (q_pts[static_cast<std::size_t>(i)] < best_q - me_opts.dbl_window) continue;
+        if (std::find(cands.begin(), cands.end(), i) == cands.end()) cands.push_back(i);
+    }
+    if (cands.size() <= 1) return indexToBid(cands[0]);
+
+    // Extract our 5 initial cards and the 27 unknown cards.
+    int my5[5];
+    int n_my = 0;
+    int rem27[27];
+    int n_rem = 0;
+    for (int c = 0; c < kCards; ++c) {
+        if (bs.hand5 & bit(c)) {
+            if (n_my < 5) my5[n_my++] = c;
+        } else {
+            if (n_rem < 27) rem27[n_rem++] = c;
+        }
+    }
+    if (n_my != 5 || n_rem != 27) return chooseBid(bs, allow_double, double_margin);
+
+    const int my_team = teamOf(bs.me);
+    const int my_score = my_team == 0 ? bs.sn : bs.ew;
+    const int opp_score = my_team == 0 ? bs.ew : bs.sn;
+    const auto& me_tbl = MatchEquityTable::instance();
+    const double passout_eq = me_tbl.preDealEquity(my_score, opp_score, bs.hanging, teamOf(nextSeat(bs.first)) == my_team);
+
+    auto pickFast = [&](std::uint8_t c) -> const BgFastPolicyModel* {
+        const BgFastPolicyModel* sp = (c & kAllTrumps) ? me_opts.fast_at
+                                    : (c & kNoTrumps)  ? me_opts.fast_nt
+                                                       : me_opts.fast_suit;
+        if (sp && sp->loaded()) return sp;
+        if (me_opts.fast_fallback && me_opts.fast_fallback->loaded()) return me_opts.fast_fallback;
+        return nullptr;
+    };
+
+    const int W = me_opts.worlds;
+    std::vector<double> log_w(static_cast<std::size_t>(W), 0.0);
+    std::vector<std::vector<double>> eqs(cands.size(), std::vector<double>(static_cast<std::size_t>(W), 0.5));
+    const double temp = std::max(0.5, me_opts.prior_temp);
+
+    for (int w = 0; w < W; ++w) {
+        std::shuffle(rem27, rem27 + 27, rng);
+        std::array<int, kCards> deck{};
+        int r_idx = 0;
+        // Round::dealCards(0, 5) deals seat s's 5 initial cards from deck[4*i + s] (i=0..4).
+        for (int pos = 0; pos < 20; ++pos) {
+            if ((pos & 3) == bs.me) {
+                deck[static_cast<std::size_t>(pos)] = my5[pos >> 2];
+            } else {
+                deck[static_cast<std::size_t>(pos)] = rem27[r_idx++];
+            }
+        }
+        for (int pos = 20; pos < kCards; ++pos) {
+            deck[static_cast<std::size_t>(pos)] = rem27[r_idx++];
+        }
+
+        // Replay prior auction bids and accumulate importance log-weight from non-self seats.
+        Round rw(deck, bs.first, bs.hanging);
+        double lw = 0.0;
+        bool valid_replay = true;
+        for (const auto& [seat, actual_bid] : bs.bids) {
+            if (rw.decision() != Round::Decision::kBid) {
+                valid_replay = false;
+                break;
+            }
+            if (rw.toMove() != seat) {
+                // Forced pass was already auto-recorded by Round::moveToNextBidder().
+                continue;
+            }
+            if (seat != bs.me) {
+                std::array<double, kBgNumBids> pq{};
+                const std::uint16_t pm = evalBids(bidPublicState(rw, bs.sn, bs.ew), allow_double, pq);
+                const int abi = bidToIndex(actual_bid);
+                int n_leg = 0;
+                double mx = -1e9;
+                for (int j = 0; j < kBgNumBids; ++j) {
+                    if (pm & (1u << j)) {
+                        ++n_leg;
+                        if (pq[static_cast<std::size_t>(j)] > mx) mx = pq[static_cast<std::size_t>(j)];
+                    }
+                }
+                if (n_leg > 1) {
+                    if (pm & (1u << abi)) {
+                        double z = 0.0;
+                        for (int j = 0; j < kBgNumBids; ++j) {
+                            if (pm & (1u << j)) z += std::exp((pq[static_cast<std::size_t>(j)] - mx) / temp);
+                        }
+                        const double p_soft = std::exp((pq[static_cast<std::size_t>(abi)] - mx) / temp) / z;
+                        const double p_mix = 0.97 * p_soft + 0.03 / double(n_leg);
+                        lw += std::log(p_mix);
+                    } else {
+                        lw += std::log(0.03 / double(n_leg));
+                    }
+                }
+            }
+            rw.bid(actual_bid);
+        }
+        if (!valid_replay || rw.decision() != Round::Decision::kBid || rw.toMove() != bs.me) {
+            log_w[static_cast<std::size_t>(w)] = -1e9;
+            continue;
+        }
+        log_w[static_cast<std::size_t>(w)] = lw;
+
+        // Evaluate EVERY candidate bid on this exact paired 32-card world (CRN)!
+        for (std::size_t ci = 0; ci < cands.size(); ++ci) {
+            Round rb = rw;
+            rb.bid(indexToBid(cands[ci]));
+            while (rb.decision() == Round::Decision::kBid) {
+                rb.bid(chooseBid(rb, allow_double, double_margin));
+            }
+            if (rb.finished()) {
+                eqs[ci][static_cast<std::size_t>(w)] = passout_eq;
+                continue;
+            }
+            const BgFastPolicyModel* fp = pickFast(rb.contract());
+            while (!rb.finished()) {
+                if (rb.decision() == Round::Decision::kAnnounce) {
+                    rb.declare(chooseDeclarations(rb.offeredAnnounces()));
+                } else {
+                    const int card = fp ? fp->chooseCard(rb) : rulePolicy(rb);
+                    rb.play(card, true);
+                }
+            }
+            eqs[ci][static_cast<std::size_t>(w)] =
+                me_tbl.postDealEquity(bs.sn, bs.ew, bs.first, rb.contract(), rb.result(), my_team);
+        }
+    }
+
+    // Normalize importance weights via log-sum-exp.
+    double max_lw = -1e18;
+    for (double lw : log_w)
+        if (lw > max_lw) max_lw = lw;
+    if (max_lw < -1e8) return chooseBid(bs, allow_double, double_margin);
+
+    double w_sum = 0.0;
+    std::vector<double> wts(static_cast<std::size_t>(W), 0.0);
+    for (int w = 0; w < W; ++w) {
+        if (log_w[static_cast<std::size_t>(w)] > -1e8) {
+            wts[static_cast<std::size_t>(w)] = std::exp(log_w[static_cast<std::size_t>(w)] - max_lw);
+            w_sum += wts[static_cast<std::size_t>(w)];
+        }
+    }
+    if (w_sum <= 1e-12) return chooseBid(bs, allow_double, double_margin);
+
+    int best_bi = cands[0];
+    double best_score = -1e18;
+    for (std::size_t ci = 0; ci < cands.size(); ++ci) {
+        double mean_eq = 0.0;
+        for (int w = 0; w < W; ++w) mean_eq += wts[static_cast<std::size_t>(w)] * eqs[ci][static_cast<std::size_t>(w)];
+        mean_eq /= w_sum;
+        const int bi = cands[ci];
+        double score = mean_eq + 1e-4 * q_pts[static_cast<std::size_t>(bi)];
+        if (bi >= 7) score -= me_opts.dbl_eq_edge;
+        if (score > best_score) {
+            best_score = score;
+            best_bi = bi;
+        }
+    }
+    return indexToBid(best_bi);
+}
+
+double BgBidModel::auctionLogLik(const PublicState& ps, const Hands& hands, bool allow_double, double temp,
+                                 int n_subsets) const {
+    if (!loaded_ || ps.bids.empty()) return 0.0;
+    const double t = std::max(0.5, temp);
+    const int k_sub = std::clamp(n_subsets, 1, 8);
+
+    // Pre-extract each non-self seat's 8 cards and build k_sub evenly-covering 5-card subsets
+    // (deterministic hash rotation so all 8 cards are covered evenly).
+    std::array<std::array<Mask, 8>, kPlayers> sub5{};
+    std::array<std::array<double, 8>, kPlayers> prob{};
+    std::array<bool, kPlayers> used{};
+    for (int p = 0; p < kPlayers; ++p) {
+        if (p == ps.me) continue;
+        const Mask h8 = hands[static_cast<std::size_t>(p)] | ps.playedBy(p);
+        int cards[8];
+        int nc = 0;
+        for (Mask m = h8; m && nc < 8; m &= m - 1) cards[nc++] = lowestCard(m);
+        if (nc < 5) continue;
+        const int rot = int((std::uint32_t(h8) * 2654435761u) >> 29) & 7;
+        for (int s = 0; s < k_sub; ++s) {
+            Mask m5 = 0;
+            const int start = (rot + s * 3) % nc;
+            for (int j = 0; j < 5; ++j) m5 |= bit(cards[(start + j) % nc]);
+            sub5[static_cast<std::size_t>(p)][static_cast<std::size_t>(s)] = m5;
+            prob[static_cast<std::size_t>(p)][static_cast<std::size_t>(s)] = 1.0;
+        }
+    }
+
+    // Walk ps.bids maintaining public auction state (contract + declarer) so we know exact avail.
+    std::uint8_t contract = kPass;
+    int declarer = -1;
+    std::vector<std::pair<int, std::uint8_t>> prefix;
+    prefix.reserve(ps.bids.size());
+
+    auto availFor = [&](int seat) -> std::uint8_t {
+        const std::uint8_t clean = contract & std::uint8_t(~(kDouble | kReDouble));
+        std::uint8_t av = kPass;
+        for (std::uint8_t f : {kClubs, kDiamonds, kHearts, kSpades, kNoTrumps, kAllTrumps}) {
+            if (clean < f) av |= f;
+        }
+        if (contract != kPass && !(contract & kReDouble) && declarer >= 0) {
+            const bool decl_team = teamOf(seat) == teamOf(declarer);
+            if (contract & kDouble) {
+                if (decl_team) av |= kReDouble;
+            } else if (!decl_team) {
+                av |= kDouble;
+            }
+        }
+        return av;
+    };
+
+    for (const auto& [seat, bid] : ps.bids) {
+        const std::uint8_t av = availFor(seat);
+        if (seat != ps.me && av != kPass) {
+            used[static_cast<std::size_t>(seat)] = true;
+            BidPublicState bs;
+            bs.first = ps.first;
+            bs.me = seat;
+            bs.avail = av;
+            bs.bids = prefix;
+            bs.sn = ps.sn;
+            bs.ew = ps.ew;
+            bs.hanging = ps.hanging;
+            const int abi = bidToIndex(bid);
+
+            for (int s = 0; s < k_sub; ++s) {
+                bs.hand5 = sub5[static_cast<std::size_t>(seat)][static_cast<std::size_t>(s)];
+                std::array<double, kBgNumBids> q_pts{};
+                const std::uint16_t pm = evalBids(bs, allow_double, q_pts);
+                int n_leg = 0;
+                double mx = -1e9;
+                for (int j = 0; j < kBgNumBids; ++j) {
+                    if (pm & (1u << j)) {
+                        ++n_leg;
+                        if (q_pts[static_cast<std::size_t>(j)] > mx) mx = q_pts[static_cast<std::size_t>(j)];
+                    }
+                }
+                if (n_leg > 1) {
+                    double p_act = 0.05 / double(n_leg);
+                    if (pm & (1u << abi)) {
+                        double z = 0.0;
+                        for (int j = 0; j < kBgNumBids; ++j) {
+                            if (pm & (1u << j)) z += std::exp((q_pts[static_cast<std::size_t>(j)] - mx) / t);
+                        }
+                        p_act += 0.95 * (std::exp((q_pts[static_cast<std::size_t>(abi)] - mx) / t) / z);
+                    }
+                    prob[static_cast<std::size_t>(seat)][static_cast<std::size_t>(s)] *= p_act;
+                }
+            }
+        }
+        prefix.push_back({seat, bid});
+        if (bid != kPass) {
+            if (bid == kDouble || bid == kReDouble) {
+                contract = std::uint8_t((contract & ~(kDouble | kReDouble)) | bid);
+            } else {
+                contract = bid;
+                declarer = seat;
+            }
+        }
+    }
+
+    double log_lik = 0.0;
+    for (int p = 0; p < kPlayers; ++p) {
+        if (!used[static_cast<std::size_t>(p)]) continue;
+        double sum = 0.0;
+        for (int s = 0; s < k_sub; ++s) sum += prob[static_cast<std::size_t>(p)][static_cast<std::size_t>(s)];
+        log_lik += std::log(std::max(sum / double(k_sub), 1e-12));
+    }
+    return log_lik;
 }
 
 // ================================================================== BgBatchBidEnv
