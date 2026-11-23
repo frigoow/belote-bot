@@ -6,7 +6,7 @@
 Neural + search bots for **Bulgarian Bridge-Belot** (and a full C++ rules engine for **Belgian Belote**), built with the same single-GPU architecture as [manil-bot](https://github.com/frigoow/manil-bot) and powered by the shared [cardbot-framework](https://github.com/frigoow/cardbot-framework). Everything runs **100% offline** in native C++ on Android, Windows, macOS, and Linux.
 
 > **Headline Result (100% end-to-end, zero external bot code):**
-> **`58.25% ± 1.68 pp`** (**`+12.2 ± 1.9` game pts/game**, `+58 Elo`, `+9.6σ`, `0` fallbacks) over **2,000 mirrored 151-point games** against **unlimited-time Master** inside Nikolay Kostov's [BelotGameEngine](https://github.com/NikolayIT/BelotGameEngine/tree/master) — trained on a single consumer RTX 3060 (12 GB).
+> **`58.75% ± 1.74 pp`** (**`+12.6 ± 1.9` game pts/game**, **`+61 Elo`**, `+10.0σ`, `0` fallbacks) over **2,000 mirrored 151-point games** against **unlimited-time Master** inside Nikolay Kostov's [BelotGameEngine](https://github.com/NikolayIT/BelotGameEngine/tree/master) — trained on a single consumer RTX 3060 (12 GB).
 
 ### Download the App
 
@@ -91,8 +91,9 @@ All headline evaluations use **1,000 mirrored pairs (2,000 full 151-point games,
 | Unified Neural Hybrid (`5M` deals) | Master | Default | 2,000 | `50.30% ± 1.56 pp` | `+0.1 ± 1.6` |
 | **3-Specialist Hybrid (`5M` deals)** | Master | Default | 2,000 | `55.35% ± 1.50 pp` | `+8.5 ± 1.5` |
 | **3-Specialist Hybrid (`5M`) + `BgBidNet`** | **Ours** | **Unlimited** | 2,000 | `54.35% ± 1.74 pp` | `+8.5 ± 1.9` |
-| **3-Specialist Hybrid (`20M` refit)** | Master | **Unlimited** | 2,000 | **`56.65% ± 1.56 pp`** | **`+11.3 ± 1.6`** |
-| **3-Specialist Hybrid (`20M` refit) + `BgBidNet`** | **Ours (100% E2E)** | **Unlimited** | **2,000** | **`58.25% ± 1.68 pp`** | **`+12.2 ± 1.9`** |
+| **3-Specialist Hybrid (`20M` refit)** | Master | **Unlimited** | 2,000 | `56.65% ± 1.56 pp` | `+11.3 ± 1.6` |
+| **3-Specialist Hybrid (`20M` refit) + `BgBidNet`** | **Ours (100% E2E)** | **Unlimited** | 2,000 | `58.25% ± 1.68 pp` | `+12.2 ± 1.9` |
+| **3-Specialist (`20M` + `Suit` $S_3$ suit-perm) + `BgBidNet` (`v1.0.0`)** | **Ours (100% E2E)** | **Unlimited** | **2,000** | **`58.75% ± 1.74 pp`** | **`+12.6 ± 1.9`** |
 
 ### Bidding & Compatibility Gates (`2,000` games each vs Unlimited-Time Master)
 
@@ -100,11 +101,12 @@ All headline evaluations use **1,000 mirrored pairs (2,000 full 151-point games,
 |---|---|---:|---:|---:|
 | **Isolated Bidding** | `BgBidNet` + Master card play vs Master | **`51.15% ± 1.72 pp`** | **`+2.0 ± 1.9`** | `0` (`0.14 ms/bid`) |
 | **Mixed Partner** | `(BgBidNet + Master)` bids + Master play vs Master | **`51.20% ± 1.63 pp`** | **`+0.1 ± 1.7`** | `0` |
-| **Full End-to-End** | `BgBidNet` + `20M` 3-Specialist Hybrid vs Master | **`58.25% ± 1.68 pp`** | **`+12.2 ± 1.9`** | `0` / `288,209` calls |
+| **Full End-to-End (`v1.0.0`)** | `BgBidNet` + `Suit`-$S_3$ / `AT`-`20M` / `NT`-`20M` Hybrid vs Master | **`58.75% ± 1.74 pp`** | **`+12.6 ± 1.9`** | `0` / `289,580` calls |
 
 ### Key Empirical Takeaways
 - **Specialists beat unified models dramatically:** splitting `AT`, `Suit`, and `NT` jumped standalone `Q-GRU` from `19% → 38.5%` and full hybrid from `50.3% → 55.35%`.
-- **Refitting specialists on our own bidder's auctions + doubles (`20M`):** jumped full end-to-end win rate by **`+3.9 pp`** (`54.35% → 58.25%`) and tightened $B_\phi$ belief cross-entropy across every contract (`AT 0.840`, `Suit 0.871`, `NT 0.894–0.901` vs exact uniform `DealSampler 0.975–1.049`).
+- **Refitting specialists on our own bidder's auctions + doubles (`20M`):** jumped full end-to-end win rate by **`+3.9 pp`** (`54.35% → 58.25%`) and tightened $B_\phi$ belief cross-entropy across every contract (`AT 0.836`, `Suit 0.871`, `NT 0.894–0.901` vs exact uniform `DealSampler 0.975–1.049`).
+- **Suit-permutation symmetry ($S_3$ vs $S_4$):** adding exact $S_3$ plain-suit permutation (trump pinned at slot `0`) on `Suit` improved `Q-GRU` (`+2.056 → +2.233`), $B_\phi$ (`0.871 → 0.864/0.868`), and `FastPolicy` (`+2.156 → +2.198`), lifting full E2E to **`58.75%`** (**`+12.6 pts/game`**, **`+61 Elo`**). By contrast, $S_4$ on `NT` scrambled Bulgarian Belot's ordered auction ladder (`♣ < ♦ < ♥ < ♠`) and hurt `NT` $B_\phi$, so `v1.0.0` keeps non-permuted `AT-20M` and `NT-20M` alongside `Suit`-$S_3$.
 - **Selective exact endgame (`--exact-trick 4 --endgame 3`) beats both extremes:** turning exact AB off (`512` pure rollout worlds) loses `~6 pts/game` *and* runs slower, while pushing double-dummy AB too early inside rollouts (`--endgame 5`) drops to `57.85%` due to Trick-4 X-ray optimism bias.
 - **1-pass streaming + EMA solves bidding RL collapse:** multi-epoch replay on noisy single-deal targets (`σ ≈ 21 pts`) caused `+9.6 pt` winner's-curse overbidding on high-variance `NT`/`AT`; 1-pass streaming on fresh counterfactual batches eliminated overfitting completely (`train RMSE 25.60` vs `val RMSE 25.70`).
 
@@ -141,11 +143,11 @@ python3.12 -m venv .venv && .venv/bin/pip install -r python/requirements.txt
     -Dpybind11_DIR=$(.venv/bin/python -c 'import pybind11; print(pybind11.get_cmake_dir())')
 .venv/bin/cmake --build build -j
 
-# Fetch the latest trained networks (belot-models-v2) for the app
+# Fetch the latest trained networks (belot-models-v3) for the app
 app/fetch_models.sh
 ```
 
-Training logs and binary checkpoints live in gitignored `runs/` and `checkpoints/`. Pre-trained network bundles are published as [`belot-models-v2`](https://github.com/frigoow/belote-bot/releases/tag/belot-models-v2).
+Training logs and binary checkpoints live in gitignored `runs/` and `checkpoints/`. Pre-trained network bundles are published as [`belot-models-v3`](https://github.com/frigoow/belote-bot/releases/tag/belot-models-v3).
 
 ## License
 

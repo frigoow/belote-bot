@@ -21,7 +21,7 @@ permissions:
   contents: write
 
 env:
-  MODELS_TAG: belot-models-v2
+  MODELS_TAG: belot-models-v3
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
