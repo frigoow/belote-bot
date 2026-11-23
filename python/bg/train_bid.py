@@ -32,7 +32,10 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "build"))
+import bg  # noqa: E402,F401  (puts cardbot-framework's package on the path)
 import bg_cpp  # noqa: E402
+from bg.envs import BidEnv  # noqa: E402
+from cardbot.train import bidding  # noqa: E402
 
 
 class TeeStream:
@@ -194,12 +197,6 @@ def export_bid_bin(model: BgBidNet, path: Path, use_natural_mask: bool = True) -
         _write_resblock(f, model.trunk2)
         _write_linear(f, model.head)
     os.replace(tmp_path, path)
-
-
-@torch.no_grad()
-def update_ema(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
-    for pe, p in zip(ema_model.parameters(), model.parameters()):
-        pe.mul_(decay).add_(p, alpha=1.0 - decay)
 
 
 @torch.no_grad()
@@ -377,114 +374,60 @@ def main() -> None:
     if not args.resume:
         bin_path.unlink(missing_ok=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
+    # Training: cardbot-framework's counterfactual bid trainer (cardbot.train.bidding) with
+    # Belot's rows, bid net and export plugged in.
+    benv = BidEnv(env)
+    totals = {"deals": 0, "nodes": 0, "branches": 0, "br": 0}
     t0 = time.time()
-    total_deals = 0
-    total_nodes = 0
-    total_branches = 0
-    ema_steps = 0
 
-    for it in range(1, args.iters + 1):
-        frac = (it - 1) / max(1, args.iters - 1)
-        lr = args.min_lr + 0.5 * (args.lr - args.min_lr) * (1.0 + math.cos(math.pi * frac))
-        for pg in opt.param_groups:
-            pg["lr"] = lr
-        eps = args.explore_start + (args.explore_end - args.explore_start) * frac
+    def generate(_env, cfg, it, eps):
+        batch = env.generate_batch(args.deals_per_iter, seed=args.seed * 10000 + it + 1, explore_eps=eps,
+                                   allow_double=args.allow_double, use_natural_mask=use_natural_mask)
+        totals["br"] = int(batch["legal_mask"].sum())
+        totals["deals"] += args.deals_per_iter
+        totals["nodes"] += int(batch["n_samples"])
+        totals["branches"] += totals["br"]
+        return {k: batch[k] for k in ("suit_feats", "global_feats", "bid_hist", "n_bids", "legal_mask", "targets")}
 
-        tg = time.time()
-        batch = env.generate_batch(
-            args.deals_per_iter,
-            seed=args.seed * 10000 + it,
-            explore_eps=eps,
-            allow_double=args.allow_double,
-            use_natural_mask=use_natural_mask,
-        )
-        gen_s = time.time() - tg
-        n_samp = int(batch["n_samples"])
-        n_br = int(batch["legal_mask"].sum())
-        total_deals += args.deals_per_iter
-        total_nodes += n_samp
-        total_branches += n_br
-
-        sf = torch.from_numpy(batch["suit_feats"]).to(device, non_blocking=True)
-        gf = torch.from_numpy(batch["global_feats"]).to(device, non_blocking=True)
-        bh = torch.from_numpy(batch["bid_hist"]).to(device, non_blocking=True)
-        nb = torch.from_numpy(batch["n_bids"]).to(device, non_blocking=True)
-        lm = torch.from_numpy(batch["legal_mask"]).to(device, non_blocking=True)
-        tg_t = torch.from_numpy(batch["targets"]).to(device, non_blocking=True)
-
-        tt = time.time()
-        model.train()
-        perm = torch.randperm(n_samp, device=device)
-        mse_sum = 0.0
-        steps = 0
-        for s in range(0, n_samp, args.batch_size):
-            idx = perm[s : s + args.batch_size]
-            opt.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
-                pred = model(sf[idx], gf[idx], bh[idx], nb[idx])
-                mask = lm[idx]
-                tgt = tg_t[idx]
-                diff = (pred - tgt) * mask
-                mse_q = (diff * diff).sum() / mask.sum().clamp_min(1.0)
-                if args.adv_weight > 0.0:
-                    np_mask = mask[:, 1:]
-                    adv_pred = pred[:, 1:] - pred[:, :1]
-                    adv_tgt = tgt[:, 1:] - tgt[:, :1]
-                    adv_diff = (adv_pred - adv_tgt) * np_mask
-                    mse_adv = (adv_diff * adv_diff).sum() / np_mask.sum().clamp_min(1.0)
-                    loss = mse_q + args.adv_weight * mse_adv
-                else:
-                    loss = mse_q
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            ema_steps += 1
-            # Ramp EMA decay cleanly from 0 -> args.ema_decay during early steps
-            cur_decay = min(args.ema_decay, (1.0 + ema_steps) / (10.0 + ema_steps))
-            update_ema(ema_model, model, cur_decay)
-            mse_sum += float(mse_q.item())
-            steps += 1
-        train_s = time.time() - tt
-
-        # During warmup (it < warmup_iters), keep generating against naturalBid;
-        # once warmup finishes, snapshot the pure-anchored warmup model and enter EMA self-play!
+    def on_iter(i, ema, info):
+        it = i + 1
         in_selfplay = (it >= args.warmup_iters) or bool(args.resume)
         if it == args.warmup_iters and not args.resume:
             wu_path = out_dir / "bg_bid_wu.bin"
-            export_bid_bin(ema_model, wu_path, use_natural_mask=use_natural_mask)
+            export_bid_bin(ema, wu_path, use_natural_mask=use_natural_mask)
             print(f"   Saved pure-anchored warmup model to {wu_path}", flush=True)
-        if in_selfplay:
-            export_bid_bin(ema_model, bin_path, use_natural_mask=use_natural_mask)
-            if not env.load_bid_model(str(bin_path)):
-                raise RuntimeError(f"Failed to reload {bin_path}")
-
-        rmse_pts = math.sqrt(max(0.0, mse_sum / max(1, steps))) * 30.0
-        elapsed = time.time() - t0
+        n_samp = info["n"]
+        rmse_pts = math.sqrt(max(0.0, info["mse"])) * 30.0
         phase = "SP" if in_selfplay else "WU"
         msg = (
-            f"iter {it:3d}/{args.iters} [{phase}] | deals={total_deals:7d} nodes={n_samp:5d} "
-            f"br/node={n_br / max(1, n_samp):.2f} | trn_rmse={rmse_pts:.2f}pts lr={lr:.1e} eps={eps:.2f} | "
-            f"gen={gen_s:.1f}s trn={train_s:.1f}s ({elapsed:.0f}s)"
+            f"iter {it:3d}/{args.iters} [{phase}] | deals={totals['deals']:7d} nodes={n_samp:5d} "
+            f"br/node={totals['br'] / max(1, n_samp):.2f} | trn_rmse={rmse_pts:.2f}pts lr={info['lr']:.1e} "
+            f"eps={info['eps']:.2f} | gen={info['gen_s']:.1f}s trn={info['train_s']:.1f}s ({time.time() - t0:.0f}s)"
         )
         if it == args.warmup_iters or it % args.eval_every == 0 or it == args.iters:
-            # Temporarily load EMA weights for evaluation even during warmup!
+            # The EMA weights are evaluated even during the warm-up.
             if not in_selfplay:
-                export_bid_bin(ema_model, bin_path, use_natural_mask=use_natural_mask)
+                export_bid_bin(ema, bin_path, use_natural_mask=use_natural_mask)
                 env_eval = bg_cpp.BgBatchBidEnv(args.fast_at, args.fast_suit, args.fast_nt, threads=args.threads)
                 env_eval.load_bid_model(str(bin_path))
-                ev = run_eval_suite(
-                    ema_model, env_eval, device, args.eval_deals, eval_seed=54321,
-                    allow_double=args.allow_double, use_natural_mask=use_natural_mask,
-                )
+                ev = run_eval_suite(ema, env_eval, device, args.eval_deals, eval_seed=54321,
+                                    allow_double=args.allow_double, use_natural_mask=use_natural_mask)
             else:
-                ev = run_eval_suite(
-                    ema_model, env, device, args.eval_deals, eval_seed=54321,
-                    allow_double=args.allow_double, use_natural_mask=use_natural_mask,
-                )
+                ev = run_eval_suite(ema, env, device, args.eval_deals, eval_seed=54321,
+                                    allow_double=args.allow_double, use_natural_mask=use_natural_mask)
             msg += f"\n   EVAL: {ev}"
         print(msg, flush=True)
+
+    cfg = bidding.BidConfig(
+        iters=args.iters, deals_per_iter=args.deals_per_iter, batch_size=args.batch_size, lr=args.lr,
+        min_lr=args.min_lr, weight_decay=args.weight_decay, eps_start=args.explore_start, eps_end=args.explore_end,
+        adv_weight=args.adv_weight, ref_slot=0, ema_decay=args.ema_decay,
+        warmup_iters=0 if args.resume else args.warmup_iters, out=bin_path, amp=use_bf16, seed=args.seed,
+        device=str(device), log=None,
+        predict=lambda m, b: m(b["suit_feats"], b["global_feats"], b["bid_hist"], b["n_bids"]),
+        export=lambda net, path: export_bid_bin(net, Path(path), use_natural_mask=use_natural_mask))
+    ema_model = bidding.train(benv, model, cfg, generate_fn=generate, on_iter=on_iter, ema=ema_model)
+    total_deals, total_nodes, total_branches = totals["deals"], totals["nodes"], totals["branches"]
 
     # Save latest fully-annealed EMA checkpoint & binary
     ckpt_path = Path(args.ckpt)

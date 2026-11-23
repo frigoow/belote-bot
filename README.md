@@ -118,11 +118,11 @@ All headline evaluations use **1,000 mirrored pairs (2,000 full 151-point games,
 |---|---|
 | `cpp/bg/` | Bulgarian Bridge-Belot engine, exact `DealSampler`, Belief-DP, AVX2 neural inference (`BgBidModel`, `BgFastPolicyModel`, `BgBeliefModel`, `BgQGRUModel`), `searchCard`, exact AB solver, and multithreaded training environments (`BgBatchPlayEnv`, `BgBatchBidEnv`) |
 | `cpp/belote/` | Belgian Belote rules engine ([`docs/RULES_BELGIAN.md`](docs/RULES_BELGIAN.md)), `WorldSampler`, and `belote_cpp` module |
-| `python/bg/` | PyTorch BF16 trainers (`train_dmc.py`, `train_bid.py`), `S₃`/`S₄` suit-permutation augmentation (`suit_perm.py`), model export, and C++ parity tests |
+| `python/bg/` | The trainers (`train_dmc.py`, `train_bid.py`): cardbot-framework's DMC, distillation and bid trainers (`cardbot.train`) with Belot's parts plugged in — its models (`models.py`), env adapters (`envs.py`), `S₃`/`S₄` suit-permutation augmentation (`suit_perm.py`), belief net, evaluation and checkpoints |
 | `app/` | Cross-platform Bulgarian Belot app (Android, Windows, macOS, Linux) built on [`cardbot-framework`](https://github.com/frigoow/cardbot-framework) |
 | `tools/kostov/` | C# oracle (`oracle/`) and mirrored-match arena (`bridge/`) against `BelotGameEngine` |
 | `docs/` | Full rules specifications ([`RULES_BULGARIAN.md`](docs/RULES_BULGARIAN.md), [`RULES_BELGIAN.md`](docs/RULES_BELGIAN.md)) |
-| `cardbot-framework/` | Shared C++ search/NN/sampler kernels and Compose Multiplatform UI framework (git submodule) |
+| `cardbot-framework/` | Shared C++ search/NN/sampler kernels, the Python trainers, and the Compose Multiplatform UI framework (git submodule) |
 
 ---
 
