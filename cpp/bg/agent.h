@@ -56,6 +56,7 @@ int solveEndgameValue(const Round& r, int team, const MatchContext& match_ctx = 
 
 struct NeuralSuite {
     const BgFastPolicyModel* fast = nullptr;
+    const BgFastPolicyModel* lead = nullptr;
     const BgBeliefModel* belief = nullptr;
     const BgQGRUModel* q = nullptr;
 };
@@ -89,6 +90,7 @@ struct SearchOptions {
     bool raw_tiebreak = false;   // break exact-endgame rounded game-point ties by raw card-point margin
     int exact_worlds = 0;        // >0: cap worlds used when solving root exact (keeps Trick 3 fast!)
     double q_blend = 0.0;
+    double policy_blend = 0.0;   // > 0: add policy_blend * softmax(FastPolicy logits) on ALL tricks (incl. exact!)
     int q_taper_trick = 6;
     bool race = false;
     int race_min = 32;

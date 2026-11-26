@@ -34,9 +34,9 @@ int main(int argc, char** argv) {
     bool fast_only = false;
     std::uint64_t seed = 0;
     std::string fast_path, belief_path, qgru_path, bid_path;
-    std::string fast_suit, belief_suit, qgru_suit;
-    std::string fast_nt, belief_nt, qgru_nt;
-    std::string fast_at, belief_at, qgru_at;
+    std::string fast_suit, lead_suit, belief_suit, qgru_suit;
+    std::string fast_nt, lead_nt, belief_nt, qgru_nt;
+    std::string fast_at, lead_at, belief_at, qgru_at;
     bool bid_allow_double = false;
     double bid_double_margin = 3.0;
     BidMatchEquityOptions bid_me;
@@ -69,16 +69,20 @@ int main(int argc, char** argv) {
         else if (a == "--belief") belief_path = next();
         else if (a == "--qgru") qgru_path = next();
         else if (a == "--fast-suit") fast_suit = next();
+        else if (a == "--lead-suit") lead_suit = next();
         else if (a == "--belief-suit") belief_suit = next();
         else if (a == "--qgru-suit") qgru_suit = next();
         else if (a == "--fast-nt") fast_nt = next();
+        else if (a == "--lead-nt") lead_nt = next();
         else if (a == "--belief-nt") belief_nt = next();
         else if (a == "--qgru-nt") qgru_nt = next();
         else if (a == "--fast-at") fast_at = next();
+        else if (a == "--lead-at") lead_at = next();
         else if (a == "--belief-at") belief_at = next();
         else if (a == "--qgru-at") qgru_at = next();
         else if (a == "--belief-temp") o.belief_temp = std::stod(next());
         else if (a == "--q-blend") o.q_blend = std::stod(next());
+        else if (a == "--policy-blend") o.policy_blend = std::stod(next());
         else if (a == "--q-taper") o.q_taper_trick = std::stoi(next());
         else if (a == "--fast-lik") o.fast_lik_weight = std::stod(next());
         else if (a == "--fast-lik-temp") o.fast_lik_temp = std::stod(next());
@@ -92,7 +96,7 @@ int main(int argc, char** argv) {
         else if (a == "--fast-only") fast_only = true;
         else if (a == "--seed") seed = std::stoull(next());
     }
-    BgFastPolicyModel fast_model, fast_m_suit, fast_m_nt, fast_m_at;
+    BgFastPolicyModel fast_model, fast_m_suit, fast_m_nt, fast_m_at, lead_m_suit, lead_m_nt, lead_m_at;
     BgBeliefModel belief_model, belief_m_suit, belief_m_nt, belief_m_at;
     BgQGRUModel q_model, q_m_suit, q_m_nt, q_m_at;
     BgBidModel bid_model;
@@ -116,12 +120,15 @@ int main(int argc, char** argv) {
         !loadOne(belief_model, belief_path, o.belief_model, "--belief") ||
         !loadOne(q_model, qgru_path, o.q_model, "--qgru") ||
         !loadOne(fast_m_suit, fast_suit, o.suit_models.fast, "--fast-suit") ||
+        !loadOne(lead_m_suit, lead_suit, o.suit_models.lead, "--lead-suit") ||
         !loadOne(belief_m_suit, belief_suit, o.suit_models.belief, "--belief-suit") ||
         !loadOne(q_m_suit, qgru_suit, o.suit_models.q, "--qgru-suit") ||
         !loadOne(fast_m_nt, fast_nt, o.nt_models.fast, "--fast-nt") ||
+        !loadOne(lead_m_nt, lead_nt, o.nt_models.lead, "--lead-nt") ||
         !loadOne(belief_m_nt, belief_nt, o.nt_models.belief, "--belief-nt") ||
         !loadOne(q_m_nt, qgru_nt, o.nt_models.q, "--qgru-nt") ||
         !loadOne(fast_m_at, fast_at, o.at_models.fast, "--fast-at") ||
+        !loadOne(lead_m_at, lead_at, o.at_models.lead, "--lead-at") ||
         !loadOne(belief_m_at, belief_at, o.at_models.belief, "--belief-at") ||
         !loadOne(q_m_at, qgru_at, o.at_models.q, "--qgru-at")) {
         return 2;

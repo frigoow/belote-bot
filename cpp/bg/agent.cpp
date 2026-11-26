@@ -576,10 +576,13 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
                               : (ps.contract & kNoTrumps) ? o.nt_models
                                                           : o.suit_models;
     const BgFastPolicyModel* fast_ptr = (spec.fast && spec.fast->loaded()) ? spec.fast : o.fast_policy;
+    const BgFastPolicyModel* root_fast_ptr =
+        (ps.plays.empty() && spec.lead && spec.lead->loaded()) ? spec.lead : fast_ptr;
     const BgBeliefModel* belief_ptr = (spec.belief && spec.belief->loaded()) ? spec.belief : o.belief_model;
     const BgQGRUModel* q_ptr = (spec.q && spec.q->loaded()) ? spec.q : o.q_model;
 
     const bool use_fast = fast_ptr != nullptr && fast_ptr->loaded();
+    const bool use_root_fast = root_fast_ptr != nullptr && root_fast_ptr->loaded();
     const bool use_belief = belief_ptr != nullptr && belief_ptr->loaded();
     const bool use_q = q_ptr != nullptr && q_ptr->loaded();
 
@@ -726,6 +729,45 @@ SearchResult searchCard(const PublicState& ps, const SearchOptions& o) {
     res.overruled = rr.overruled;
     res.worlds = rr.worlds;
     res.values = rr.values;
+
+    // Optional calibrated FastPolicy softmax tiebreak active on ALL tricks (including exact tricks 4-8!).
+    // Breaks exact-endgame double-dummy & rounding ties cleanly using our neural policy (or opening-lead net at ply 0).
+    if (use_root_fast && o.policy_blend > 0.0 && res.values.size() > 1) {
+        float fstate[kBgStateDim];
+        float flogits[kCards];
+        encodeState(ps, fstate, &sampler.facts());
+        root_fast_ptr->forwardState(fstate, flogits);
+        std::vector<double> fprobs(nm, 0.0);
+        double fmax = -1e30;
+        for (std::size_t i = 0; i < nm; ++i) {
+            fprobs[i] = double(flogits[canonCard(moves[i], ps.contract)]);
+            if (fprobs[i] > fmax) fmax = fprobs[i];
+        }
+        double fsum = 0.0;
+        for (std::size_t i = 0; i < nm; ++i) {
+            fprobs[i] = std::exp(std::max(-40.0, fprobs[i] - fmax));
+            fsum += fprobs[i];
+        }
+        const double inv_fsum = 1.0 / std::max(fsum, 1e-12);
+        int best_c = res.values[0].first;
+        double best_v = -1e30;
+        for (auto& [c, v] : res.values) {
+            for (std::size_t i = 0; i < nm; ++i) {
+                if (moves[i] == c) {
+                    v += o.policy_blend * (fprobs[i] * inv_fsum);
+                    break;
+                }
+            }
+            if (v > best_v) {
+                best_v = v;
+                best_c = c;
+            }
+        }
+        if (o.z < 0 || ws.enumerated) {
+            res.card = best_c;
+            res.overruled = (res.card != res.rule_card);
+        }
+    }
     return res;
 }
 

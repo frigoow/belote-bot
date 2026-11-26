@@ -99,6 +99,8 @@ add_executable(bg_framework_duel tools/bg_framework_duel.cpp)
 target_link_libraries(bg_framework_duel PRIVATE belote_bg)
 add_executable(bg_duel tools/bg_duel.cpp)
 target_link_libraries(bg_duel PRIVATE belote_bg)
+add_executable(bg_collect_search tools/bg_collect_search.cpp)
+target_link_libraries(bg_collect_search PRIVATE belote_bg)
 
 foreach(test rules random sampler search rule_agent)
     add_executable(belote_test_${test} tests/test_${test}.cpp)
